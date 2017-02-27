@@ -145,6 +145,16 @@ struct iommu_resv_region {
 	int			type;
 };
 
+/*
+ * @handle_fault: report or handle a fault from the device (FIXME: imprecise)
+ * @invalidate_pasid: stop using a PASID.
+ */
+struct iommu_svm_ops {
+	int (*handle_fault)(struct device *dev, int pasid, u64 address,
+			    int prot, int status, void *priv);
+	int (*invalidate_pasid)(struct device *dev, int pasid, void *priv);
+};
+
 #ifdef CONFIG_IOMMU_API
 
 /**
@@ -154,6 +164,9 @@ struct iommu_resv_region {
  * @domain_free: free iommu domain
  * @attach_dev: attach device to an iommu domain
  * @detach_dev: detach device from an iommu domain
+ * @set_svm_ops: set SVM callbacks for device
+ * @bind_task: attach a task address space to a device
+ * @unbind_task: detach a task address space from a device
  * @map: map a physically contiguous memory region to an iommu domain
  * @unmap: unmap a physically contiguous memory region from an iommu domain
  * @map_sg: map a scatter-gather list of physically contiguous memory chunks
@@ -183,6 +196,10 @@ struct iommu_ops {
 
 	int (*attach_dev)(struct iommu_domain *domain, struct device *dev);
 	void (*detach_dev)(struct iommu_domain *domain, struct device *dev);
+	int (*set_svm_ops)(struct device *dev, const struct iommu_svm_ops *ops);
+	int (*bind_task)(struct device *dev, struct task_struct *task,
+			 int *pasid, int flags, void *priv);
+	int (*unbind_task)(struct device *dev, int pasid, int flags);
 	int (*map)(struct iommu_domain *domain, unsigned long iova,
 		   phys_addr_t paddr, size_t size, int prot);
 	size_t (*unmap)(struct iommu_domain *domain, unsigned long iova,
@@ -402,6 +419,13 @@ int iommu_fwspec_init(struct device *dev, struct fwnode_handle *iommu_fwnode,
 void iommu_fwspec_free(struct device *dev);
 int iommu_fwspec_add_ids(struct device *dev, u32 *ids, int num_ids);
 const struct iommu_ops *iommu_ops_from_fwnode(struct fwnode_handle *fwnode);
+
+extern int iommu_set_svm_ops(struct device *dev,
+			     const struct iommu_svm_ops *svm_ops);
+extern int iommu_bind_task(struct device *dev, struct task_struct *task,
+			   int *pasid, int flags, void *priv);
+
+extern int iommu_unbind_task(struct device *dev, int pasid, int flags);
 
 #else /* CONFIG_IOMMU_API */
 
@@ -661,6 +685,23 @@ static inline
 const struct iommu_ops *iommu_ops_from_fwnode(struct fwnode_handle *fwnode)
 {
 	return NULL;
+}
+
+static inline int iommu_set_svm_ops(struct device *dev,
+				    const struct iommu_svm_ops *svm_ops)
+{
+	return -ENODEV;
+}
+
+static inline int iommu_bind_task(struct device *dev, struct task_struct *task,
+				  int *pasid, int flags, void *priv)
+{
+	return -ENODEV;
+}
+
+static int iommu_unbind_task(struct device *dev, int pasid, int flags)
+{
+	return -ENODEV;
 }
 
 #endif /* CONFIG_IOMMU_API */

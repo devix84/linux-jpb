@@ -1438,6 +1438,114 @@ void iommu_detach_group(struct iommu_domain *domain, struct iommu_group *group)
 }
 EXPORT_SYMBOL_GPL(iommu_detach_group);
 
+int iommu_set_svm_ops(struct device *dev, const struct iommu_svm_ops *svm_ops)
+{
+	const struct iommu_ops *ops;
+	struct iommu_group *group;
+	int ret;
+
+	group = iommu_group_get_for_dev(dev);
+	if (IS_ERR(group))
+		return PTR_ERR(group);
+
+	ops = dev->bus->iommu_ops;
+	if (!ops->set_svm_ops) {
+		iommu_group_put(group);
+		return -ENODEV;
+	}
+
+	mutex_lock(&group->mutex);
+	ret = ops->set_svm_ops(dev, svm_ops);
+	mutex_unlock(&group->mutex);
+
+	iommu_group_put(group);
+	return ret;
+
+}
+EXPORT_SYMBOL_GPL(iommu_set_svm_ops);
+
+/*
+ * iommu_bind_task - Share task address space with device
+ *
+ * @dev: device to bind
+ * @task: task to bind
+ * @pasid: valid address where the PASID is stored
+ * @flags: driver-specific flags
+ * @priv: private data to associate with the bond
+ *
+ * Create a bond between device and task, allowing the device to access the task
+ * address space using @pasid. Intel and ARM SMMU drivers allocate and return
+ * the PASID, while AMD requires the caller to allocate a PASID beforehand.
+ *
+ * iommu_unbind_task must be called with this PASID before the task exits.
+ */
+int iommu_bind_task(struct device *dev, struct task_struct *task, int *pasid,
+		    int flags, void *priv)
+{
+	const struct iommu_ops *ops;
+	struct iommu_group *group;
+	int ret;
+
+	if (!pasid)
+		return -EINVAL;
+
+	group = iommu_group_get(dev);
+	if (!group)
+		return -ENODEV;
+
+	ops = dev->bus->iommu_ops;
+	if (!ops->bind_task) {
+		iommu_group_put(group);
+		return -ENODEV;
+	}
+
+	mutex_lock(&group->mutex);
+	if (!group->domain)
+		ret = -EINVAL;
+	else
+		ret = ops->bind_task(dev, task, pasid, flags, priv);
+	mutex_unlock(&group->mutex);
+
+	iommu_group_put(group);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(iommu_bind_task);
+
+/*
+ * iommu_unbind_task - Remove a bond created with iommu_bind_task
+ *
+ * @dev: device bound to the task
+ * @pasid: identifier of the bond
+ * @flags: state of the PASID and driver-specific flags
+ */
+int iommu_unbind_task(struct device *dev, int pasid, int flags)
+{
+	const struct iommu_ops *ops;
+	struct iommu_group *group;
+	int ret;
+
+	group = iommu_group_get(dev);
+	if (!group)
+		return -ENODEV;
+
+	ops = dev->bus->iommu_ops;
+	if (!ops->unbind_task) {
+		iommu_group_put(group);
+		return -ENODEV;
+	}
+
+	mutex_lock(&group->mutex);
+	if (!group->domain)
+		ret = -EINVAL;
+	else
+		ret = ops->unbind_task(dev, pasid, flags);
+	mutex_unlock(&group->mutex);
+
+	iommu_group_put(group);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(iommu_unbind_task);
+
 phys_addr_t iommu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 {
 	if (unlikely(domain->ops->iova_to_phys == NULL))
