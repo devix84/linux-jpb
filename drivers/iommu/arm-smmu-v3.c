@@ -651,9 +651,15 @@ struct arm_smmu_domain {
 	};
 
 	struct iommu_domain		domain;
+
+	struct list_head		groups;
+	spinlock_t			groups_lock;
 };
 
 struct arm_smmu_group {
+	struct arm_smmu_domain		*domain;
+	struct list_head		domain_head;
+
 	struct list_head		devices;
 	spinlock_t			devices_lock;
 };
@@ -1408,6 +1414,9 @@ static struct iommu_domain *arm_smmu_domain_alloc(unsigned type)
 
 	mutex_init(&smmu_domain->init_mutex);
 	spin_lock_init(&smmu_domain->pgtbl_lock);
+	INIT_LIST_HEAD(&smmu_domain->groups);
+	spin_lock_init(&smmu_domain->groups_lock);
+
 	return &smmu_domain->domain;
 }
 
@@ -1641,6 +1650,7 @@ static void arm_smmu_detach_dev(struct device *dev)
 static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 {
 	int ret = 0;
+	unsigned long flags;
 	struct iommu_group *group;
 	struct arm_smmu_device *smmu;
 	struct arm_smmu_group *smmu_group;
@@ -1666,9 +1676,31 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 		return -ENOMEM;
 	}
 
-	/* Already attached to a different domain? */
-	if (!ste->bypass)
+	/*
+	 * Already attached to a different domain? This happens when we're
+	 * switching from default domain to unmanaged domain, and back. We
+	 * assume here that, when switching from old domain to new domain, old
+	 * domain doesn't have any live mapping anymore. This is an important
+	 * requirement because here we remove the group-domain link when we
+	 * re-attach the first device in a group. Other devices in that group
+	 * might still be attached to the old domain, and will be reattached in
+	 * a moment.
+	 *
+	 * We also take this path when attaching for the very first time, just
+	 * after the STE is initialized.
+	 */
+	if (!ste->bypass) {
+		struct arm_smmu_domain *other_domain = smmu_group->domain;
+
+		if (other_domain) {
+			spin_lock_irqsave(&other_domain->groups_lock, flags);
+			list_del(&smmu_group->domain_head);
+			spin_unlock_irqrestore(&other_domain->groups_lock, flags);
+
+			smmu_group->domain = NULL;
+		}
 		arm_smmu_detach_dev(dev);
+	}
 
 	mutex_lock(&smmu_domain->init_mutex);
 
@@ -1686,6 +1718,14 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 			dev_name(smmu->dev));
 		ret = -ENXIO;
 		goto out_unlock;
+	}
+
+	if (!smmu_group->domain) {
+		smmu_group->domain = smmu_domain;
+
+		spin_lock_irqsave(&smmu_domain->groups_lock, flags);
+		list_add(&smmu_group->domain_head, &smmu_domain->groups);
+		spin_unlock_irqrestore(&smmu_domain->groups_lock, flags);
 	}
 
 	ste->bypass = false;
