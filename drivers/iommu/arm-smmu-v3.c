@@ -723,6 +723,7 @@ struct arm_smmu_device {
 	struct list_head		tasks;
 
 	struct workqueue_struct		*fault_queue;
+	struct work_struct		flush_prgs;
 
 	struct list_head		domains;
 	struct mutex			domains_mutex;
@@ -1798,7 +1799,8 @@ static irqreturn_t arm_smmu_evtq_thread(int irq, void *dev)
 
 static void arm_smmu_handle_fault(struct work_struct *work);
 
-static void arm_smmu_handle_ppr(struct arm_smmu_device *smmu, u64 *evt)
+static void arm_smmu_handle_ppr(struct arm_smmu_device *smmu, u64 *evt,
+				bool overflowing)
 {
 	struct arm_smmu_fault *fault;
 	struct arm_smmu_fault params = {
@@ -1817,6 +1819,9 @@ static void arm_smmu_handle_ppr(struct arm_smmu_device *smmu, u64 *evt)
 		.priv	= evt[0] & PRIQ_0_PERM_PRIV,
 	};
 
+	if (overflowing && !params.last)
+		return;
+
 	fault = kmem_cache_alloc(arm_smmu_fault_cache, GFP_KERNEL);
 	if (!fault) {
 		/* Out of memory, tell the device to retry later */
@@ -1834,6 +1839,7 @@ static irqreturn_t arm_smmu_priq_thread(int irq, void *dev)
 	struct arm_smmu_device *smmu = dev;
 	struct arm_smmu_queue *q = &smmu->priq.q;
 	size_t queue_size = 1 << q->max_n_shift;
+	bool overflowing = false;
 	u64 evt[PRIQ_ENT_DWORDS];
 	size_t i = 0;
 
@@ -1842,7 +1848,7 @@ static irqreturn_t arm_smmu_priq_thread(int irq, void *dev)
 	do {
 		while (!queue_remove_raw(q, evt)) {
 			spin_unlock(&smmu->priq.wq.lock);
-			arm_smmu_handle_ppr(smmu, evt);
+			arm_smmu_handle_ppr(smmu, evt, overflowing);
 			spin_lock(&smmu->priq.wq.lock);
 			if (++i == queue_size) {
 				smmu->priq.batch++;
@@ -1851,8 +1857,10 @@ static irqreturn_t arm_smmu_priq_thread(int irq, void *dev)
 			}
 		}
 
-		if (queue_sync_prod(q) == -EOVERFLOW)
+		if (queue_sync_prod(q) == -EOVERFLOW) {
 			dev_err(smmu->dev, "PRIQ overflow detected -- requests lost\n");
+			overflowing = true;
+		}
 	} while (!queue_empty(q));
 
 	/* Sync our overflow flag, as we believe we're up to speed */
@@ -1862,6 +1870,9 @@ static irqreturn_t arm_smmu_priq_thread(int irq, void *dev)
 	wake_up_locked(&smmu->priq.wq);
 
 	spin_unlock(&smmu->priq.wq.lock);
+
+	if (overflowing)
+		queue_work(smmu->fault_queue, &smmu->flush_prgs);
 
 	return IRQ_HANDLED;
 }
@@ -2818,6 +2829,24 @@ static void arm_smmu_handle_fault(struct work_struct *work)
 	arm_smmu_fault_reply(fault, resp);
 
 	kfree(fault);
+}
+
+static void arm_smmu_flush_prgs(struct work_struct *work)
+{
+	struct arm_smmu_device *smmu;
+	struct arm_smmu_task *smmu_task;
+	struct arm_smmu_pri_group *prg, *next_prg;
+
+	smmu = container_of(work, struct arm_smmu_device, flush_prgs);
+
+	spin_lock(&smmu->contexts_lock);
+	list_for_each_entry(smmu_task, &smmu->tasks, smmu_head) {
+		list_for_each_entry_safe(prg, next_prg, &smmu_task->prgs, list) {
+			list_del(&prg->list);
+			kfree(prg);
+		}
+	}
+	spin_unlock(&smmu->contexts_lock);
 }
 
 static void arm_smmu_sweep_contexts(struct work_struct *work)
@@ -4269,6 +4298,8 @@ static int arm_smmu_init_structures(struct arm_smmu_device *smmu)
 		smmu->fault_queue = alloc_ordered_workqueue("smmu_fault_queue", 0);
 		if (!smmu->fault_queue)
 			return -ENOMEM;
+
+		INIT_WORK(&smmu->flush_prgs, arm_smmu_flush_prgs);
 	}
 
 	return arm_smmu_init_strtab(smmu);
