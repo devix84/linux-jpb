@@ -68,6 +68,8 @@
 #define IDR0_ASID16			(1 << 12)
 #define IDR0_ATS			(1 << 10)
 #define IDR0_HYP			(1 << 9)
+#define IDR0_HD				(1 << 7)
+#define IDR0_HA				(1 << 6)
 #define IDR0_BTM			(1 << 5)
 #define IDR0_COHACC			(1 << 4)
 #define IDR0_TTF_SHIFT			2
@@ -346,7 +348,16 @@
 #define ARM64_TCR_TBI0_SHIFT		37
 #define ARM64_TCR_TBI0_MASK		0x1UL
 
+#define ARM64_TCR_HA_SHIFT		39
+#define ARM64_TCR_HA_MASK		0x1UL
+#define ARM64_TCR_HD_SHIFT		40
+#define ARM64_TCR_HD_MASK		0x1UL
+
 #define CTXDESC_CD_0_AA64		(1UL << 41)
+#define CTXDESC_CD_0_TCR_HD_SHIFT	42
+#define CTXDESC_CD_0_TCR_HA_SHIFT	43
+#define CTXDESC_CD_0_HD			(1UL << CTXDESC_CD_0_TCR_HD_SHIFT)
+#define CTXDESC_CD_0_HA			(1UL << CTXDESC_CD_0_TCR_HA_SHIFT)
 #define CTXDESC_CD_0_R			(1UL << 45)
 #define CTXDESC_CD_0_A			(1UL << 46)
 #define CTXDESC_CD_0_ASET_SHIFT		47
@@ -687,6 +698,8 @@ struct arm_smmu_device {
 #define ARM_SMMU_FEAT_E2H		(1 << 13)
 #define ARM_SMMU_FEAT_BTM		(1 << 14)
 #define ARM_SMMU_FEAT_SVM		(1 << 15)
+#define ARM_SMMU_FEAT_HA		(1 << 16)
+#define ARM_SMMU_FEAT_HD		(1 << 17)
 	u32				features;
 
 #define ARM_SMMU_OPT_SKIP_PREFETCH	(1 << 0)
@@ -1274,6 +1287,12 @@ static u64 arm_smmu_cpu_tcr_to_cd(struct arm_smmu_device *smmu, u64 tcr)
 	val |= ARM_SMMU_TCR2CD(tcr, IPS);
 	if (!(smmu->features & ARM_SMMU_FEAT_ATS))
 		val |= ARM_SMMU_TCR2CD(tcr, TBI0);
+
+	if (smmu->features & ARM_SMMU_FEAT_HA)
+		val |= ARM_SMMU_TCR2CD(tcr, HA);
+
+	if (smmu->features & ARM_SMMU_FEAT_HD)
+		val |= ARM_SMMU_TCR2CD(tcr, HD);
 
 	return val;
 }
@@ -2497,7 +2516,7 @@ static int arm_smmu_init_task_pgtable(struct arm_smmu_task *smmu_task)
 	tcr |= par << ARM_LPAE_TCR_IPS_SHIFT;
 
 	/* Enable this by default, it will be filtered when writing the CD */
-	tcr |= TCR_TBI0;
+	tcr |= TCR_TBI0 | TCR_HA | TCR_HD;
 
 	cfg->asid	= asid;
 	cfg->ttbr	= virt_to_phys(smmu_task->mm->pgd);
@@ -4732,6 +4751,12 @@ static int arm_smmu_device_hw_probe(struct arm_smmu_device *smmu)
 		smmu->features |= ARM_SMMU_FEAT_HYP;
 		if (vhe)
 			smmu->features |= ARM_SMMU_FEAT_E2H;
+	}
+
+	if (IS_ENABLED(CONFIG_ARM64_HW_AFDBM) && (reg & (IDR0_HA | IDR0_HD))) {
+		smmu->features |= ARM_SMMU_FEAT_HA;
+		if (reg & IDR0_HD)
+			smmu->features |= ARM_SMMU_FEAT_HD;
 	}
 
 	/*
