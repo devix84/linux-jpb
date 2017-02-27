@@ -50,6 +50,21 @@ struct notifier_block;
 #define IOMMU_FAULT_READ	0x0
 #define IOMMU_FAULT_WRITE	0x1
 
+/*
+ * State of a PASID in the system
+ *
+ * IOMMU_PASID_FLUSHED: the device does not generate any traffic for this PASID
+ *   anymore, and all references to the PASID have been flushed; in other words,
+ *   the IOMMU will not receive any transaction referring to this instance of
+ *   the PASID anymore.
+ *
+ * IOMMU_PASID_CLEAN: in addition to IOMMU_PASID_FLUSHED, the PASID isn't
+ *   present in the IOMMU either. For instance when using PRI, the device waited
+ *   for all of its page requests to come back with a response.
+ */
+#define IOMMU_PASID_FLUSHED	0x1
+#define IOMMU_PASID_CLEAN	0x2
+
 typedef int (*iommu_fault_handler_t)(struct iommu_domain *,
 			struct device *, unsigned long, int, void *);
 
@@ -147,7 +162,8 @@ struct iommu_resv_region {
 
 /*
  * @handle_fault: report or handle a fault from the device (FIXME: imprecise)
- * @invalidate_pasid: stop using a PASID.
+ * @invalidate_pasid: stop using a PASID. Returns one of IOMMU_PASID_FLUSHED or
+ *                    IOMMU_PASID_CLEAN when stopped successfully. 0 otherwise.
  */
 struct iommu_svm_ops {
 	int (*handle_fault)(struct device *dev, int pasid, u64 address,

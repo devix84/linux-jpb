@@ -1517,6 +1517,14 @@ EXPORT_SYMBOL_GPL(iommu_bind_task);
  * @dev: device bound to the task
  * @pasid: identifier of the bond
  * @flags: state of the PASID and driver-specific flags
+ *
+ * The caller must informs the IOMMU driver whether the PASID is safe to reuse
+ * immediately or if it needs more invalidation steps, by setting flags to
+ * either IOMMU_PASID_FLUSHED, or IOMMU_PASID_CLEAN.
+ *
+ * Without one of these flags, the device driver must have provided an
+ * invalidate_pasid callback in iommu_svm_ops. Otherwise, iommu_unbind_task
+ * returns an error.
  */
 int iommu_unbind_task(struct device *dev, int pasid, int flags)
 {
