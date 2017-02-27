@@ -44,6 +44,7 @@
 #include <linux/amba/bus.h>
 
 #include "io-pgtable.h"
+#include "io-pgtable-arm.h"
 
 /* MMIO registers */
 #define ARM_SMMU_IDR0			0x0
@@ -2191,6 +2192,9 @@ static int arm_smmu_init_task_pgtable(struct arm_smmu_task *smmu_task)
 {
 	int ret;
 	int asid;
+	unsigned long tcr;
+	unsigned long reg, par;
+	struct arm_smmu_s1_cfg *cfg = &smmu_task->s1_cfg;
 
 	/* Pin ASID on the CPU side */
 	asid = mm_context_get(smmu_task->mm);
@@ -2203,8 +2207,39 @@ static int arm_smmu_init_task_pgtable(struct arm_smmu_task *smmu_task)
 		return ret;
 	}
 
-	/* TODO: Initialize the rest of s1_cfg */
-	smmu_task->s1_cfg.asid = asid;
+	tcr = TCR_T0SZ(VA_BITS) | TCR_IRGN0_WBWA | TCR_ORGN0_WBWA |
+		TCR_SH0_INNER | ARM_LPAE_TCR_EPD1;
+
+	switch (PAGE_SIZE) {
+	case SZ_4K:
+		tcr |= TCR_TG0_4K;
+		break;
+	case SZ_16K:
+		tcr |= TCR_TG0_16K;
+		break;
+	case SZ_64K:
+		tcr |= TCR_TG0_64K;
+		break;
+	default:
+		WARN_ON(1);
+		return -EFAULT;
+	}
+
+	reg = read_system_reg(SYS_ID_AA64MMFR0_EL1);
+	par = cpuid_feature_extract_unsigned_field(reg, ID_AA64MMFR0_PARANGE_SHIFT);
+	tcr |= par << ARM_LPAE_TCR_IPS_SHIFT;
+
+	/* Enable this by default, it will be filtered when writing the CD */
+	tcr |= TCR_TBI0;
+
+	cfg->asid	= asid;
+	cfg->ttbr	= virt_to_phys(smmu_task->mm->pgd);
+	/*
+	 * MAIR value is pretty much constant and global, so we can just get it
+	 * from the current CPU register
+	 */
+	cfg->mair	= read_sysreg(mair_el1);
+	cfg->tcr	= tcr;
 
 	return 0;
 }
