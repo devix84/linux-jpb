@@ -198,6 +198,7 @@ struct vfio_device_info {
 #define VFIO_DEVICE_FLAGS_PCI	(1 << 1)	/* vfio-pci device */
 #define VFIO_DEVICE_FLAGS_PLATFORM (1 << 2)	/* vfio-platform device */
 #define VFIO_DEVICE_FLAGS_AMBA  (1 << 3)	/* vfio-amba device */
+#define VFIO_DEVICE_FLAGS_SVM	(1 << 4)	/* Device supports bind/unbind */
 	__u32	num_regions;	/* Max region index + 1 */
 	__u32	num_irqs;	/* Max IRQ index + 1 */
 };
@@ -408,6 +409,60 @@ struct vfio_irq_set {
  * Reset a device.
  */
 #define VFIO_DEVICE_RESET		_IO(VFIO_TYPE, VFIO_BASE + 11)
+
+struct vfio_device_svm {
+	__u32	argsz;
+	__u32	flags;
+#define VFIO_SVM_PASID_RELEASE_FLUSHED	(1 << 0)
+#define VFIO_SVM_PASID_RELEASE_CLEAN	(1 << 1)
+	__u32	pasid;
+};
+/*
+ * VFIO_DEVICE_BIND_TASK - _IOWR(VFIO_TYPE, VFIO_BASE + 22,
+ *                               struct vfio_device_svm)
+ *
+ * Share a process' virtual address space with the device.
+ *
+ * This feature creates a new address space for the device, which is not
+ * affected by VFIO_IOMMU_MAP/UNMAP_DMA. Instead, the device can tag its DMA
+ * traffic with the given @pasid to perform transactions on the associated
+ * virtual address space. Mapping and unmapping of buffers is performed by
+ * standard functions such as mmap and malloc.
+ *
+ * On success, VFIO writes a Process Address Space ID (PASID) into @pasid. This
+ * ID is unique to a device.
+ *
+ * The bond between device and process must be removed with
+ * VFIO_DEVICE_UNBIND_TASK before exiting.
+ *
+ * On fork, the child inherits the device fd and can use the bonds setup by its
+ * parent. Consequently, the child has R/W access on the address spaces bound by
+ * its parent. After an execv, the device fd is closed and the child doesn't
+ * have access to the address space anymore.
+ *
+ * Availability of this feature depends on the device, its bus, the underlying
+ * IOMMU and the CPU architecture. All of these are guaranteed when the device
+ * has VFIO_DEVICE_FLAGS_SVM flag set.
+ *
+ * returns: 0 on success, -errno on failure.
+ */
+#define VFIO_DEVICE_BIND_TASK	_IO(VFIO_TYPE, VFIO_BASE + 22)
+
+/*
+ * VFIO_DEVICE_UNBIND_TASK - _IOWR(VFIO_TYPE, VFIO_BASE + 23,
+ *                                 struct vfio_device_svm)
+ *
+ * Unbind address space identified by @pasid from device. Device must have
+ * stopped issuing any DMA transaction for the PASID and flushed any reference
+ * to this PASID upstream. Some IOMMUs need to know when a PASID is safe to
+ * reuse, in which case one of the following must be present in @flags
+ *
+ * VFIO_PASID_RELEASE_FLUSHED: the PASID is safe to reassign after the IOMMU
+ *       receives an invalidation message from the device.
+ *
+ * VFIO_PASID_RELEASE_CLEAN: the PASID is safe to reassign immediately.
+ */
+#define VFIO_DEVICE_UNBIND_TASK	_IO(VFIO_TYPE, VFIO_BASE + 23)
 
 /*
  * The VFIO-PCI bus driver makes use of the following fixed region and

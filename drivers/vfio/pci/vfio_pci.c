@@ -22,6 +22,7 @@
 #include <linux/mutex.h>
 #include <linux/notifier.h>
 #include <linux/pci.h>
+#include <linux/pci-ats.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/types.h>
@@ -623,6 +624,26 @@ int vfio_pci_register_dev_region(struct vfio_pci_device *vdev,
 	return 0;
 }
 
+static bool vfio_pci_supports_svm(struct vfio_pci_device *vdev)
+{
+	struct pci_dev *pdev = vdev->pdev;
+
+	if (!pdev->ats_enabled)
+		return false;
+
+	if (!pdev->pasid_enabled || pci_max_pasids(pdev) <= 1)
+		return false;
+
+	if (!pdev->pri_enabled)
+		return false;
+
+	/*
+	 * If the IOMMU driver enabled all of these, then it supports PCI SVM
+	 * for this device.
+	 */
+	return true;
+}
+
 static long vfio_pci_ioctl(void *device_data,
 			   unsigned int cmd, unsigned long arg)
 {
@@ -641,6 +662,9 @@ static long vfio_pci_ioctl(void *device_data,
 			return -EINVAL;
 
 		info.flags = VFIO_DEVICE_FLAGS_PCI;
+
+		if (vfio_pci_supports_svm(vdev))
+			info.flags |= VFIO_DEVICE_FLAGS_SVM;
 
 		if (vdev->reset_works)
 			info.flags |= VFIO_DEVICE_FLAGS_RESET;

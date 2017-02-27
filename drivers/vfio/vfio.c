@@ -97,6 +97,14 @@ struct vfio_device {
 	struct vfio_group		*group;
 	struct list_head		group_next;
 	void				*device_data;
+
+	struct mutex			tasks_lock;
+	struct list_head		tasks;
+};
+
+struct vfio_task {
+	int				pasid;
+	struct list_head		list;
 };
 
 #ifdef CONFIG_VFIO_NOIOMMU
@@ -520,6 +528,9 @@ struct vfio_device *vfio_group_create_device(struct vfio_group *group,
 	device->device_data = device_data;
 	dev_set_drvdata(dev, device);
 
+	mutex_init(&device->tasks_lock);
+	INIT_LIST_HEAD(&device->tasks);
+
 	/* No need to get group_lock, caller has group reference */
 	vfio_group_get(group);
 
@@ -532,12 +543,30 @@ struct vfio_device *vfio_group_create_device(struct vfio_group *group,
 
 static void vfio_device_release(struct kref *kref)
 {
+	int ret;
+	struct vfio_task *tmp, *task;
 	struct vfio_device *device = container_of(kref,
 						  struct vfio_device, kref);
 	struct vfio_group *group = device->group;
 
 	list_del(&device->group_next);
 	mutex_unlock(&group->device_lock);
+
+	mutex_lock(&device->tasks_lock);
+	list_for_each_entry_safe(task, tmp, &device->tasks, list) {
+		/*
+		 * This might leak the PASID, since the IOMMU won't know
+		 * if it is safe to reuse.
+		 */
+		ret = iommu_unbind_task(device->dev, task->pasid, 0);
+		if (ret)
+			dev_warn(device->dev, "failed to unbind PASID %u\n",
+				 task->pasid);
+
+		list_del(&task->list);
+		kfree(task);
+	}
+	mutex_unlock(&device->tasks_lock);
 
 	dev_set_drvdata(device->dev, NULL);
 
@@ -1622,6 +1651,75 @@ static int vfio_device_fops_release(struct inode *inode, struct file *filep)
 	return 0;
 }
 
+static long vfio_svm_ioctl(struct vfio_device *device, unsigned int cmd,
+			   unsigned long arg)
+{
+	int ret;
+	unsigned long minsz;
+
+	struct vfio_device_svm svm;
+	struct vfio_task *vfio_task;
+
+	minsz = offsetofend(struct vfio_device_svm, pasid);
+
+	if (copy_from_user(&svm, (void __user *)arg, minsz))
+		return -EFAULT;
+
+	if (svm.argsz < minsz)
+		return -EINVAL;
+
+	if (cmd == VFIO_DEVICE_BIND_TASK) {
+		struct task_struct *task = current;
+
+		ret = iommu_bind_task(device->dev, task, &svm.pasid, 0, NULL);
+		if (ret)
+			return ret;
+
+		vfio_task = kzalloc(sizeof(*vfio_task), GFP_KERNEL);
+		if (!vfio_task) {
+			iommu_unbind_task(device->dev, svm.pasid,
+					  IOMMU_PASID_CLEAN);
+			return -ENOMEM;
+		}
+
+		vfio_task->pasid = svm.pasid;
+
+		mutex_lock(&device->tasks_lock);
+		list_add(&vfio_task->list, &device->tasks);
+		mutex_unlock(&device->tasks_lock);
+
+	} else {
+		int flags = 0;
+
+		if (svm.flags & ~(VFIO_SVM_PASID_RELEASE_FLUSHED |
+				  VFIO_SVM_PASID_RELEASE_CLEAN))
+			return -EINVAL;
+
+		if (svm.flags & VFIO_SVM_PASID_RELEASE_FLUSHED)
+			flags = IOMMU_PASID_FLUSHED;
+		else if (svm.flags & VFIO_SVM_PASID_RELEASE_CLEAN)
+			flags = IOMMU_PASID_CLEAN;
+
+		mutex_lock(&device->tasks_lock);
+		list_for_each_entry(vfio_task, &device->tasks, list) {
+			if (vfio_task->pasid != svm.pasid)
+				continue;
+
+			ret = iommu_unbind_task(device->dev, svm.pasid, flags);
+			if (ret)
+				dev_warn(device->dev, "failed to unbind PASID %u\n",
+					 vfio_task->pasid);
+
+			list_del(&vfio_task->list);
+			kfree(vfio_task);
+			break;
+		}
+		mutex_unlock(&device->tasks_lock);
+	}
+
+	return copy_to_user((void __user *)arg, &svm, minsz) ? -EFAULT : 0;
+}
+
 static long vfio_device_fops_unl_ioctl(struct file *filep,
 				       unsigned int cmd, unsigned long arg)
 {
@@ -1629,6 +1727,12 @@ static long vfio_device_fops_unl_ioctl(struct file *filep,
 
 	if (unlikely(!device->ops->ioctl))
 		return -EINVAL;
+
+	switch (cmd) {
+	case VFIO_DEVICE_BIND_TASK:
+	case VFIO_DEVICE_UNBIND_TASK:
+		return vfio_svm_ioctl(device, cmd, arg);
+	}
 
 	return device->ops->ioctl(device->device_data, cmd, arg);
 }
