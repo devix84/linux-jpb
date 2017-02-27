@@ -474,6 +474,8 @@ enum fault_status {
 	ARM_SMMU_FAULT_FAIL,
 	/* Fault has been handled, the access should be retried */
 	ARM_SMMU_FAULT_SUCC,
+	/* Do not send any reply to the device */
+	ARM_SMMU_FAULT_IGNORE,
 };
 
 enum arm_smmu_msi_index {
@@ -593,6 +595,9 @@ struct arm_smmu_evtq {
 
 struct arm_smmu_priq {
 	struct arm_smmu_queue		q;
+
+	u64				batch;
+	wait_queue_head_t		wq;
 };
 
 /* High-level stream table and context descriptor structures */
@@ -742,6 +747,10 @@ struct arm_smmu_master_data {
 
 	bool				can_fault;
 	u32				avail_contexts;
+	struct work_struct		sweep_contexts;
+#define STALE_CONTEXTS_LIMIT(master)	((master)->avail_contexts / 4)
+	u32				stale_contexts;
+
 	const struct iommu_svm_ops	*svm_ops;
 };
 
@@ -825,8 +834,15 @@ struct arm_smmu_context {
 
 	struct list_head		task_head;
 	struct rb_node			master_node;
+	struct list_head		flush_head;
 
 	struct kref			kref;
+
+#define ARM_SMMU_CONTEXT_STALE		(1 << 0)
+#define ARM_SMMU_CONTEXT_INVALIDATED	(1 << 1)
+#define ARM_SMMU_CONTEXT_FREE		(ARM_SMMU_CONTEXT_STALE |\
+					 ARM_SMMU_CONTEXT_INVALIDATED)
+	atomic64_t			state;
 };
 
 struct arm_smmu_group {
@@ -1179,7 +1195,7 @@ static void arm_smmu_fault_reply(struct arm_smmu_fault *fault,
 		},
 	};
 
-	if (!fault->last)
+	if (!fault->last || resp == ARM_SMMU_FAULT_IGNORE)
 		return;
 
 	arm_smmu_cmdq_issue_cmd(fault->smmu, &cmd);
@@ -1807,11 +1823,23 @@ static irqreturn_t arm_smmu_priq_thread(int irq, void *dev)
 {
 	struct arm_smmu_device *smmu = dev;
 	struct arm_smmu_queue *q = &smmu->priq.q;
+	size_t queue_size = 1 << q->max_n_shift;
 	u64 evt[PRIQ_ENT_DWORDS];
+	size_t i = 0;
+
+	spin_lock(&smmu->priq.wq.lock);
 
 	do {
-		while (!queue_remove_raw(q, evt))
+		while (!queue_remove_raw(q, evt)) {
+			spin_unlock(&smmu->priq.wq.lock);
 			arm_smmu_handle_ppr(smmu, evt);
+			spin_lock(&smmu->priq.wq.lock);
+			if (++i == queue_size) {
+				smmu->priq.batch++;
+				wake_up_locked(&smmu->priq.wq);
+				i = 0;
+			}
+		}
 
 		if (queue_sync_prod(q) == -EOVERFLOW)
 			dev_err(smmu->dev, "PRIQ overflow detected -- requests lost\n");
@@ -1819,6 +1847,12 @@ static irqreturn_t arm_smmu_priq_thread(int irq, void *dev)
 
 	/* Sync our overflow flag, as we believe we're up to speed */
 	q->cons = Q_OVF(q, q->prod) | Q_WRP(q, q->cons) | Q_IDX(q, q->cons);
+
+	smmu->priq.batch++;
+	wake_up_locked(&smmu->priq.wq);
+
+	spin_unlock(&smmu->priq.wq.lock);
+
 	return IRQ_HANDLED;
 }
 
@@ -2684,6 +2718,22 @@ static enum fault_status _arm_smmu_handle_fault(struct arm_smmu_fault *fault)
 		return resp;
 	}
 
+	if (fault->last && !fault->read && !fault->write) {
+		/* Special case: stop marker invalidates the PASID */
+		u64 val = atomic64_fetch_or(ARM_SMMU_CONTEXT_INVALIDATED,
+					    &smmu_context->state);
+		if (val == ARM_SMMU_CONTEXT_STALE) {
+			spin_lock(&smmu->contexts_lock);
+			_arm_smmu_put_context(smmu_context);
+			smmu_context->master->stale_contexts--;
+			spin_unlock(&smmu->contexts_lock);
+		}
+
+		/* No reply expected */
+		resp = ARM_SMMU_FAULT_IGNORE;
+		goto out_put_context;
+	}
+
 	fault->ssv = smmu_context->master->ste.prg_response_needs_ssid;
 
 	spin_lock(&smmu->contexts_lock);
@@ -2693,6 +2743,7 @@ static enum fault_status _arm_smmu_handle_fault(struct arm_smmu_fault *fault)
 	spin_unlock(&smmu->contexts_lock);
 
 	if (!smmu_task)
+		/* Stale context */
 		goto out_put_context;
 
 	list_for_each_entry(tmp_prg, &smmu_task->prgs, list) {
@@ -2744,7 +2795,7 @@ static void arm_smmu_handle_fault(struct work_struct *work)
 						    work);
 
 	resp = _arm_smmu_handle_fault(fault);
-	if (resp != ARM_SMMU_FAULT_SUCC)
+	if (resp != ARM_SMMU_FAULT_SUCC && resp != ARM_SMMU_FAULT_IGNORE)
 		dev_info_ratelimited(fault->smmu->dev, "%s fault:\n"
 			"\t0x%08x.0x%05x: [%u%s] %sprivileged %s%s%s access at iova "
 			"0x%016llx\n",
@@ -2757,6 +2808,81 @@ static void arm_smmu_handle_fault(struct work_struct *work)
 	arm_smmu_fault_reply(fault, resp);
 
 	kfree(fault);
+}
+
+static void arm_smmu_sweep_contexts(struct work_struct *work)
+{
+	u64 batch;
+	int ret, i = 0;
+	struct arm_smmu_priq *priq;
+	struct arm_smmu_device *smmu;
+	struct arm_smmu_master_data *master;
+	struct arm_smmu_context *smmu_context, *tmp;
+	struct list_head flush_list = LIST_HEAD_INIT(flush_list);
+
+	master = container_of(work, struct arm_smmu_master_data, sweep_contexts);
+	smmu = master->smmu;
+	priq = &smmu->priq;
+
+	spin_lock(&smmu->contexts_lock);
+	dev_dbg(smmu->dev, "Sweeping contexts %u/%u\n",
+		master->stale_contexts, master->avail_contexts);
+
+	rbtree_postorder_for_each_entry_safe(smmu_context, tmp,
+					     &master->contexts, master_node) {
+		u64 val = atomic64_cmpxchg(&smmu_context->state,
+					   ARM_SMMU_CONTEXT_STALE,
+					   ARM_SMMU_CONTEXT_FREE);
+		if (val != ARM_SMMU_CONTEXT_STALE)
+			continue;
+
+		/*
+		 * We volunteered for deleting this context by setting the state
+		 * atomically. This guarantees that no one else writes to its
+		 * flush_head field.
+		 */
+		list_add(&smmu_context->flush_head, &flush_list);
+	}
+	spin_unlock(&smmu->contexts_lock);
+
+	if (list_empty(&flush_list))
+		return;
+
+	/*
+	 * Now wait until the priq thread finishes a batch, or until the queue
+	 * is empty. After that, we are certain that the last references to this
+	 * context have been flushed to the fault work queue. Note that we don't
+	 * handle overflows on priq->batch. If it occurs, just wait for the
+	 * queue to be empty.
+	 */
+	spin_lock(&priq->wq.lock);
+	if (queue_sync_prod(&priq->q) == -EOVERFLOW)
+		dev_err(smmu->dev, "PRIQ overflow detected -- requests lost\n");
+	batch = priq->batch;
+	ret = wait_event_interruptible_locked(priq->wq, queue_empty(&priq->q) ||
+					      priq->batch >= batch + 2);
+	spin_unlock(&priq->wq.lock);
+
+	if (ret) {
+		/* Woops, rollback. */
+		spin_lock(&smmu->contexts_lock);
+		list_for_each_entry(smmu_context, &flush_list, flush_head)
+			atomic64_xchg(&smmu_context->state,
+				      ARM_SMMU_CONTEXT_STALE);
+		spin_unlock(&smmu->contexts_lock);
+		return;
+	}
+
+	flush_workqueue(smmu->fault_queue);
+
+	spin_lock(&smmu->contexts_lock);
+	list_for_each_entry_safe(smmu_context, tmp, &flush_list, flush_head) {
+		_arm_smmu_put_context(smmu_context);
+		i++;
+	}
+
+	master->stale_contexts -= i;
+	spin_unlock(&smmu->contexts_lock);
 }
 
 static bool arm_smmu_master_supports_svm(struct arm_smmu_master_data *master)
@@ -2780,6 +2906,18 @@ static int arm_smmu_set_svm_ops(struct device *dev,
 	master->svm_ops = svm_ops;
 
 	return 0;
+}
+
+static int arm_smmu_invalidate_context(struct arm_smmu_context *smmu_context)
+{
+	struct arm_smmu_master_data *master = smmu_context->master;
+
+	if (!master->svm_ops || !master->svm_ops->invalidate_pasid)
+		return 0;
+
+	return master->svm_ops->invalidate_pasid(master->dev,
+						 smmu_context->ssid,
+						 smmu_context->priv);
 }
 
 static int arm_smmu_bind_task(struct device *dev, struct task_struct *task,
@@ -2876,6 +3014,10 @@ static int arm_smmu_bind_task(struct device *dev, struct task_struct *task,
 
 static int arm_smmu_unbind_task(struct device *dev, int pasid, int flags)
 {
+	int ret;
+	unsigned long val;
+	unsigned int pasid_state;
+	bool put_context = false;
 	struct arm_smmu_device *smmu;
 	struct arm_smmu_master_data *master;
 	struct arm_smmu_context *smmu_context = NULL;
@@ -2895,11 +3037,33 @@ static int arm_smmu_unbind_task(struct device *dev, int pasid, int flags)
 
 	dev_dbg(dev, "unbind PASID %d\n", pasid);
 
+	pasid_state = flags & (IOMMU_PASID_FLUSHED | IOMMU_PASID_CLEAN);
+	if (!pasid_state)
+		pasid_state = arm_smmu_invalidate_context(smmu_context);
+
+	if (!pasid_state) {
+		/* PASID is in use, we can't do anything. */
+		ret = -EBUSY;
+		goto err_put_context;
+	}
+
 	/*
 	 * There isn't any "ATC invalidate all by PASID" command. If this isn't
 	 * good enough, we'll need fine-grained invalidation for each vma.
 	 */
 	arm_smmu_atc_invalidate_context(smmu_context, 0, -1);
+
+	val = atomic64_fetch_or(ARM_SMMU_CONTEXT_STALE, &smmu_context->state);
+	if (val == ARM_SMMU_CONTEXT_INVALIDATED || !master->can_fault) {
+		/* We already received a stop marker for this context. */
+		put_context = true;
+	} else if (pasid_state & IOMMU_PASID_CLEAN) {
+		/* We are allowed to free the PASID now! */
+		val = atomic64_fetch_or(ARM_SMMU_CONTEXT_INVALIDATED,
+					&smmu_context->state);
+		if (val == ARM_SMMU_CONTEXT_STALE)
+			put_context = true;
+	}
 
 	spin_lock(&smmu->contexts_lock);
 	if (smmu_context->task)
@@ -2907,10 +3071,19 @@ static int arm_smmu_unbind_task(struct device *dev, int pasid, int flags)
 
 	/* Release the ref we got earlier in this function */
 	_arm_smmu_put_context(smmu_context);
-	_arm_smmu_put_context(smmu_context);
+
+	if (put_context)
+		_arm_smmu_put_context(smmu_context);
+	else if (++master->stale_contexts >= STALE_CONTEXTS_LIMIT(master))
+		queue_work(system_long_wq, &master->sweep_contexts);
 	spin_unlock(&smmu->contexts_lock);
 
 	return 0;
+
+err_put_context:
+	arm_smmu_put_context(smmu, smmu_context);
+
+	return ret;
 }
 
 static struct iommu_domain *arm_smmu_domain_alloc(unsigned type)
@@ -3137,6 +3310,7 @@ static void arm_smmu_detach_dev(struct device *dev)
 	struct arm_smmu_device *smmu = master->smmu;
 	struct arm_smmu_context *smmu_context;
 	struct rb_node *node, *next;
+	int new_stale_contexts = 0;
 
 	mutex_lock(&smmu->domains_mutex);
 
@@ -3151,17 +3325,64 @@ static void arm_smmu_detach_dev(struct device *dev)
 	if (!master->ste.valid)
 		return;
 
+	/* Try to clean the contexts. */
 	spin_lock(&smmu->contexts_lock);
 	for (node = rb_first(&master->contexts); node; node = next) {
+		u64 val;
+		int pasid_state = 0;
+
 		smmu_context = rb_entry(node, struct arm_smmu_context,
 					master_node);
 		next = rb_next(node);
 
-		if (smmu_context->task)
-			arm_smmu_detach_task(smmu_context);
+		val = atomic64_fetch_or(ARM_SMMU_CONTEXT_STALE,
+					&smmu_context->state);
+		if (val == ARM_SMMU_CONTEXT_FREE)
+			/* Someone else is waiting to free this context */
+			continue;
+
+		if (!(val & ARM_SMMU_CONTEXT_STALE)) {
+			pasid_state = arm_smmu_invalidate_context(smmu_context);
+			if (!pasid_state) {
+				/*
+				 * This deserves a slap, since there still
+				 * might be references to that PASID hanging
+				 * around downstream of the SMMU and we can't
+				 * do anything about it.
+				 */
+				dev_warn(dev, "PASID %u was still bound!\n",
+					 smmu_context->ssid);
+			}
+
+			if (smmu_context->task)
+				arm_smmu_detach_task(smmu_context);
+			else
+				dev_warn(dev, "bound without a task?!");
+
+			new_stale_contexts++;
+		}
+
+		if (!(val & ARM_SMMU_CONTEXT_INVALIDATED) && master->can_fault &&
+		    !(pasid_state & IOMMU_PASID_CLEAN)) {
+			/*
+			 * We can't free the context yet, its PASID might still
+			 * be waiting in the pipe.
+			 */
+			continue;
+		}
+
+		val = atomic64_fetch_or(ARM_SMMU_CONTEXT_INVALIDATED,
+					&smmu_context->state);
+		if (val == ARM_SMMU_CONTEXT_FREE)
+			continue;
 
 		_arm_smmu_put_context(smmu_context);
+		new_stale_contexts--;
 	}
+
+	master->stale_contexts += new_stale_contexts;
+	if (master->stale_contexts)
+		queue_work(system_long_wq, &master->sweep_contexts);
 	spin_unlock(&smmu->contexts_lock);
 }
 
@@ -3581,6 +3802,8 @@ static int arm_smmu_add_device(struct device *dev)
 		fwspec->iommu_priv = master;
 
 		master->contexts = RB_ROOT;
+
+		INIT_WORK(&master->sweep_contexts, arm_smmu_sweep_contexts);
 	}
 
 	/* Check the SIDs are in range of the SMMU and our stream table */
@@ -3653,11 +3876,14 @@ err_disable_ssid:
 static void arm_smmu_remove_device(struct device *dev)
 {
 	struct iommu_fwspec *fwspec = dev->iommu_fwspec;
+	struct arm_smmu_context *smmu_context;
 	struct arm_smmu_master_data *master;
 	struct arm_smmu_group *smmu_group;
 	struct arm_smmu_device *smmu;
+	struct rb_node *node, *next;
 	struct iommu_group *group;
 	unsigned long flags;
+	u64 val;
 	int i;
 
 	if (!fwspec || fwspec->ops != &arm_smmu_ops)
@@ -3669,15 +3895,39 @@ static void arm_smmu_remove_device(struct device *dev)
 		arm_smmu_detach_dev(dev);
 
 	if (master) {
+		cancel_work_sync(&master->sweep_contexts);
+
+		spin_lock(&smmu->contexts_lock);
+
+		for (node = rb_first(&master->contexts); node; node = next) {
+			smmu_context = rb_entry(node, struct arm_smmu_context,
+						master_node);
+			next = rb_next(node);
+
+			/*
+			 * Force removal of remaining contexts. They were marked
+			 * stale by detach_dev, but haven't been invalidated
+			 * since. Page requests might be pending but we can't
+			 * afford to wait for them anymore. Bad things will
+			 * happen.
+			 */
+			dev_warn(dev, "PASID %u wasn't invalidated\n",
+				 smmu_context->ssid);
+			val = atomic64_xchg(&smmu_context->state,
+					    ARM_SMMU_CONTEXT_FREE);
+			if (val != ARM_SMMU_CONTEXT_FREE)
+				_arm_smmu_put_context(smmu_context);
+		}
+
 		if (master->streams) {
-			spin_lock(&smmu->contexts_lock);
 			for (i = 0; i < fwspec->num_ids; i++)
 				rb_erase(&master->streams[i].node,
 					 &smmu->streams);
-			spin_unlock(&smmu->contexts_lock);
 
 			kfree(master->streams);
 		}
+
+		spin_unlock(&smmu->contexts_lock);
 
 		group = iommu_group_get(dev);
 		smmu_group = to_smmu_group(group);
@@ -3863,6 +4113,9 @@ static int arm_smmu_init_queues(struct arm_smmu_device *smmu)
 	/* priq */
 	if (!(smmu->features & ARM_SMMU_FEAT_PRI))
 		return 0;
+
+	init_waitqueue_head(&smmu->priq.wq);
+	smmu->priq.batch = 0;
 
 	return arm_smmu_init_one_queue(smmu, &smmu->priq.q, ARM_SMMU_PRIQ_PROD,
 				       ARM_SMMU_PRIQ_CONS, PRIQ_ENT_DWORDS);
