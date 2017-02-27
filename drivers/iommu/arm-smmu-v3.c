@@ -35,6 +35,7 @@
 #include <linux/of_iommu.h>
 #include <linux/of_platform.h>
 #include <linux/pci.h>
+#include <linux/pci-ats.h>
 #include <linux/platform_device.h>
 
 #include <linux/amba/bus.h>
@@ -102,6 +103,7 @@
 #define IDR5_OAS_48_BIT			(5 << IDR5_OAS_SHIFT)
 
 #define ARM_SMMU_CR0			0x20
+#define CR0_ATSCHK			(1 << 4)
 #define CR0_CMDQEN			(1 << 3)
 #define CR0_EVTQEN			(1 << 2)
 #define CR0_PRIQEN			(1 << 1)
@@ -343,6 +345,7 @@
 #define CMDQ_ERR_CERROR_NONE_IDX	0
 #define CMDQ_ERR_CERROR_ILL_IDX		1
 #define CMDQ_ERR_CERROR_ABT_IDX		2
+#define CMDQ_ERR_CERROR_ATC_INV_IDX	3
 
 #define CMDQ_0_OP_SHIFT			0
 #define CMDQ_0_OP_MASK			0xffUL
@@ -363,6 +366,15 @@
 #define CMDQ_TLBI_1_LEAF		(1UL << 0)
 #define CMDQ_TLBI_1_VA_MASK		~0xfffUL
 #define CMDQ_TLBI_1_IPA_MASK		0xfffffffff000UL
+
+#define CMDQ_ATC_0_SSID_SHIFT		12
+#define CMDQ_ATC_0_SSID_MASK		0xfffffUL
+#define CMDQ_ATC_0_SID_SHIFT		32
+#define CMDQ_ATC_0_SID_MASK		0xffffffffUL
+#define CMDQ_ATC_0_GLOBAL		(1UL << 9)
+#define CMDQ_ATC_1_SIZE_SHIFT		0
+#define CMDQ_ATC_1_SIZE_MASK		0x3fUL
+#define CMDQ_ATC_1_ADDR_MASK		~0xfffUL
 
 #define CMDQ_PRI_0_SSID_SHIFT		12
 #define CMDQ_PRI_0_SSID_MASK		0xfffffUL
@@ -416,6 +428,11 @@ static bool disable_bypass;
 module_param_named(disable_bypass, disable_bypass, bool, S_IRUGO);
 MODULE_PARM_DESC(disable_bypass,
 	"Disable bypass streams such that incoming transactions from devices that are not attached to an iommu domain will report an abort back to the device and will not be allowed to pass through the SMMU.");
+
+static bool disable_ats_check;
+module_param_named(disable_ats_check, disable_ats_check, bool, S_IRUGO);
+MODULE_PARM_DESC(disable_ats_check,
+	"By default, the SMMU checks whether each incoming transaction marked as translated is allowed by the stream configuration. This option disables the check.");
 
 enum pri_resp {
 	PRI_RESP_DENY,
@@ -484,6 +501,15 @@ struct arm_smmu_cmdq_ent {
 			bool			leaf;
 			u64			addr;
 		} tlbi;
+
+		#define CMDQ_OP_ATC_INV		0x40
+		struct {
+			u32			sid;
+			u32			ssid;
+			u64			addr;
+			u8			size;
+			bool			global;
+		} atc;
 
 		#define CMDQ_OP_PRI_RESP	0x41
 		struct {
@@ -662,6 +688,8 @@ struct arm_smmu_group {
 
 	struct list_head		devices;
 	spinlock_t			devices_lock;
+
+	bool				ats_enabled;
 };
 
 struct arm_smmu_option_prop {
@@ -839,6 +867,14 @@ static int arm_smmu_cmdq_build_cmd(u64 *cmd, struct arm_smmu_cmdq_ent *ent)
 	case CMDQ_OP_TLBI_S12_VMALL:
 		cmd[0] |= (u64)ent->tlbi.vmid << CMDQ_TLBI_0_VMID_SHIFT;
 		break;
+	case CMDQ_OP_ATC_INV:
+		cmd[0] |= ent->substream_valid ? CMDQ_0_SSV : 0;
+		cmd[0] |= ent->atc.global ? CMDQ_ATC_0_GLOBAL : 0;
+		cmd[0] |= ent->atc.ssid << CMDQ_ATC_0_SSID_SHIFT;
+		cmd[0] |= (u64)ent->atc.sid << CMDQ_ATC_0_SID_SHIFT;
+		cmd[1] |= ent->atc.size << CMDQ_ATC_1_SIZE_SHIFT;
+		cmd[1] |= ent->atc.addr & CMDQ_ATC_1_ADDR_MASK;
+		break;
 	case CMDQ_OP_PRI_RESP:
 		cmd[0] |= ent->substream_valid ? CMDQ_0_SSV : 0;
 		cmd[0] |= ent->pri.ssid << CMDQ_PRI_0_SSID_SHIFT;
@@ -874,6 +910,7 @@ static void arm_smmu_cmdq_skip_err(struct arm_smmu_device *smmu)
 		[CMDQ_ERR_CERROR_NONE_IDX]	= "No error",
 		[CMDQ_ERR_CERROR_ILL_IDX]	= "Illegal command",
 		[CMDQ_ERR_CERROR_ABT_IDX]	= "Abort on command fetch",
+		[CMDQ_ERR_CERROR_ATC_INV_IDX]	= "ATC invalidate timeout",
 	};
 
 	int i;
@@ -893,6 +930,13 @@ static void arm_smmu_cmdq_skip_err(struct arm_smmu_device *smmu)
 		dev_err(smmu->dev, "retrying command fetch\n");
 	case CMDQ_ERR_CERROR_NONE_IDX:
 		return;
+	case CMDQ_ERR_CERROR_ATC_INV_IDX:
+		/*
+		 * CMD_SYNC failed because of ATC Invalidation completion
+		 * timeout. CONS is still pointing at the CMD_SYNC. Ensure other
+		 * operations complete by re-submitting the CMD_SYNC, cowardly
+		 * ignoring the ATC error.
+		 */
 	case CMDQ_ERR_CERROR_ILL_IDX:
 		/* Fallthrough */
 	default:
@@ -1084,9 +1128,6 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_device *smmu, u32 sid,
 			 STRTAB_STE_1_S1C_CACHE_WBRA
 			 << STRTAB_STE_1_S1COR_SHIFT |
 			 STRTAB_STE_1_S1C_SH_ISH << STRTAB_STE_1_S1CSH_SHIFT |
-#ifdef CONFIG_PCI_ATS
-			 STRTAB_STE_1_EATS_TRANS << STRTAB_STE_1_EATS_SHIFT |
-#endif
 			 STRTAB_STE_1_STRW_NSEL1 << STRTAB_STE_1_STRW_SHIFT);
 
 		if (smmu->features & ARM_SMMU_FEAT_STALLS)
@@ -1114,6 +1155,10 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_device *smmu, u32 sid,
 
 		val |= STRTAB_STE_0_CFG_S2_TRANS;
 	}
+
+	if (IS_ENABLED(CONFIG_PCI_ATS) && !ste_live)
+		dst[1] |= cpu_to_le64(STRTAB_STE_1_EATS_TRANS
+				      << STRTAB_STE_1_EATS_SHIFT);
 
 	arm_smmu_sync_ste_for_sid(smmu, sid);
 	dst[0] = cpu_to_le64(val);
@@ -1376,6 +1421,120 @@ static const struct iommu_gather_ops arm_smmu_gather_ops = {
 	.tlb_add_flush	= arm_smmu_tlb_inv_range_nosync,
 	.tlb_sync	= arm_smmu_tlb_sync,
 };
+
+static void arm_smmu_atc_invalidate_to_cmd(struct arm_smmu_device *smmu,
+					   unsigned long iova, size_t size,
+					   struct arm_smmu_cmdq_ent *cmd)
+{
+	size_t log2_span;
+	size_t span_mask;
+	size_t smmu_grain;
+	/* ATC invalidates are always on 4096 bytes pages */
+	size_t inval_grain_shift = 12;
+	unsigned long iova_start, iova_end;
+	unsigned long page_start, page_end;
+
+	smmu_grain	= 1ULL << __ffs(smmu->pgsize_bitmap);
+
+	/* In case parameters are not aligned on PAGE_SIZE */
+	iova_start	= round_down(iova, smmu_grain);
+	iova_end	= round_up(iova + size, smmu_grain) - 1;
+
+	page_start	= iova_start >> inval_grain_shift;
+	page_end	= iova_end >> inval_grain_shift;
+
+	/*
+	 * Find the smallest power of two that covers the range. Most
+	 * significant differing bit between start and end address indicates the
+	 * required span, ie. fls(start ^ end). For example:
+	 *
+	 * We want to invalidate pages [8; 11]. This is already the ideal range:
+	 *		x = 0b1000 ^ 0b1011 = 0b11
+	 *		span = 1 << fls(x) = 4
+	 *
+	 * To invalidate pages [7; 10], we need to invalidate [0; 15]:
+	 *		x = 0b0111 ^ 0b1010 = 0b1101
+	 *		span = 1 << fls(x) = 16
+	 */
+	log2_span	= fls_long(page_start ^ page_end);
+	span_mask	= (1ULL << log2_span) - 1;
+
+	page_start	&= ~span_mask;
+
+	*cmd = (struct arm_smmu_cmdq_ent) {
+		.opcode	= CMDQ_OP_ATC_INV,
+		.atc	= {
+			.addr = page_start << inval_grain_shift,
+			.size = log2_span,
+		}
+	};
+}
+
+static int arm_smmu_atc_invalidate_master(struct arm_smmu_master_data *master,
+					  struct arm_smmu_cmdq_ent *cmd)
+{
+	int i;
+	struct iommu_fwspec *fwspec = master->dev->iommu_fwspec;
+	struct pci_dev *pdev = to_pci_dev(master->dev);
+
+	if (!pdev->ats_enabled)
+		return 0;
+
+	for (i = 0; i < fwspec->num_ids; i++) {
+		cmd->atc.sid = fwspec->ids[i];
+
+		dev_dbg(master->smmu->dev,
+			"ATC invalidate %#x:%#x:%#llx-%#llx, esz=%d\n",
+			cmd->atc.sid, cmd->atc.ssid, cmd->atc.addr,
+			cmd->atc.addr + (1 << (cmd->atc.size + 12)) - 1,
+			cmd->atc.size);
+
+		arm_smmu_cmdq_issue_cmd(master->smmu, cmd);
+	}
+
+	return 0;
+}
+
+static size_t arm_smmu_atc_invalidate_domain(struct arm_smmu_domain *smmu_domain,
+					     unsigned long iova, size_t size)
+{
+	unsigned long flags;
+	struct arm_smmu_cmdq_ent cmd = {0};
+	struct arm_smmu_group *smmu_group;
+	struct arm_smmu_master_data *master;
+	struct arm_smmu_device *smmu = smmu_domain->smmu;
+	struct arm_smmu_cmdq_ent sync_cmd = {
+		.opcode = CMDQ_OP_CMD_SYNC,
+	};
+
+	spin_lock_irqsave(&smmu_domain->groups_lock, flags);
+
+	list_for_each_entry(smmu_group, &smmu_domain->groups, domain_head) {
+		if (!smmu_group->ats_enabled)
+			continue;
+
+		/* Initialise command lazily */
+		if (!cmd.opcode)
+			arm_smmu_atc_invalidate_to_cmd(smmu, iova, size, &cmd);
+
+		spin_lock(&smmu_group->devices_lock);
+
+		list_for_each_entry(master, &smmu_group->devices, group_head)
+			arm_smmu_atc_invalidate_master(master, &cmd);
+
+		/*
+		 * TODO: ensure we do a sync whenever we have sent ats_queue_depth
+		 * invalidations to the same device.
+		 */
+		arm_smmu_cmdq_issue_cmd(smmu, &sync_cmd);
+
+		spin_unlock(&smmu_group->devices_lock);
+	}
+
+	spin_unlock_irqrestore(&smmu_domain->groups_lock, flags);
+
+	return size;
+}
 
 /* IOMMU API */
 static bool arm_smmu_capable(enum iommu_cap cap)
@@ -1782,7 +1941,10 @@ arm_smmu_unmap(struct iommu_domain *domain, unsigned long iova, size_t size)
 
 	spin_lock_irqsave(&smmu_domain->pgtbl_lock, flags);
 	ret = ops->unmap(ops, iova, size);
+	if (ret)
+		ret = arm_smmu_atc_invalidate_domain(smmu_domain, iova, size);
 	spin_unlock_irqrestore(&smmu_domain->pgtbl_lock, flags);
+
 	return ret;
 }
 
@@ -1830,11 +1992,63 @@ static bool arm_smmu_sid_in_range(struct arm_smmu_device *smmu, u32 sid)
 	return sid < limit;
 }
 
+/*
+ * Returns -ENOSYS if ATS is not supported either by the device or by the SMMU
+ */
+static int arm_smmu_enable_ats(struct arm_smmu_master_data *master)
+{
+	int ret;
+	size_t stu;
+	struct pci_dev *pdev;
+	struct arm_smmu_device *smmu = master->smmu;
+
+	if (!(smmu->features & ARM_SMMU_FEAT_ATS) || !dev_is_pci(master->dev))
+		return -ENOSYS;
+
+	pdev = to_pci_dev(master->dev);
+
+#ifdef CONFIG_PCI_ATS
+	if (!pdev->ats_cap)
+		return -ENOSYS;
+#else
+	return -ENOSYS;
+#endif
+
+	/* Smallest Translation Unit: log2 of the smallest supported granule */
+	stu = __ffs(smmu->pgsize_bitmap);
+
+	ret = pci_enable_ats(pdev, stu);
+	if (ret) {
+		dev_err(&pdev->dev, "cannot enable ATS: %d\n", ret);
+		return ret;
+	}
+
+	dev_dbg(&pdev->dev, "enabled ATS with STU = %zu\n", stu);
+
+	return 0;
+}
+
+static void arm_smmu_disable_ats(struct arm_smmu_master_data *master)
+{
+	struct pci_dev *pdev;
+
+	if (!dev_is_pci(master->dev))
+		return;
+
+	pdev = to_pci_dev(master->dev);
+
+	if (!pdev->ats_enabled)
+		return;
+
+	pci_disable_ats(pdev);
+}
+
 static struct iommu_ops arm_smmu_ops;
 
 static int arm_smmu_add_device(struct device *dev)
 {
 	int i, ret;
+	bool ats_enabled;
 	unsigned long flags;
 	struct arm_smmu_device *smmu;
 	struct arm_smmu_group *smmu_group;
@@ -1880,19 +2094,31 @@ static int arm_smmu_add_device(struct device *dev)
 		}
 	}
 
+	ats_enabled = !arm_smmu_enable_ats(master);
+
 	group = iommu_group_get_for_dev(dev);
-	if (!IS_ERR(group)) {
-		smmu_group = to_smmu_group(group);
-
-		spin_lock_irqsave(&smmu_group->devices_lock, flags);
-		list_add(&master->group_head, &smmu_group->devices);
-		spin_unlock_irqrestore(&smmu_group->devices_lock, flags);
-
-		iommu_group_put(group);
-		iommu_device_link(&smmu->iommu, dev);
+	if (IS_ERR(group)) {
+		ret = PTR_ERR(group);
+		goto err_disable_ats;
 	}
 
-	return PTR_ERR_OR_ZERO(group);
+	smmu_group = to_smmu_group(group);
+
+	smmu_group->ats_enabled |= ats_enabled;
+
+	spin_lock_irqsave(&smmu_group->devices_lock, flags);
+	list_add(&master->group_head, &smmu_group->devices);
+	spin_unlock_irqrestore(&smmu_group->devices_lock, flags);
+
+	iommu_group_put(group);
+	iommu_device_link(&smmu->iommu, dev);
+
+	return 0;
+
+err_disable_ats:
+	arm_smmu_disable_ats(master);
+
+	return ret;
 }
 
 static void arm_smmu_remove_device(struct device *dev)
@@ -1921,6 +2147,8 @@ static void arm_smmu_remove_device(struct device *dev)
 		spin_unlock_irqrestore(&smmu_group->devices_lock, flags);
 
 		iommu_group_put(group);
+
+		arm_smmu_disable_ats(master);
 	}
 
 	iommu_group_remove_device(dev);
@@ -2481,6 +2709,16 @@ static int arm_smmu_device_reset(struct arm_smmu_device *smmu, bool bypass)
 					      ARM_SMMU_CR0ACK);
 		if (ret) {
 			dev_err(smmu->dev, "failed to enable PRI queue\n");
+			return ret;
+		}
+	}
+
+	if (smmu->features & ARM_SMMU_FEAT_ATS && !disable_ats_check) {
+		enables |= CR0_ATSCHK;
+		ret = arm_smmu_write_reg_sync(smmu, enables, ARM_SMMU_CR0,
+					      ARM_SMMU_CR0ACK);
+		if (ret) {
+			dev_err(smmu->dev, "failed to enable ATS check\n");
 			return ret;
 		}
 	}
