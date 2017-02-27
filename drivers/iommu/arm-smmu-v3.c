@@ -932,6 +932,16 @@ static void queue_inc_cons(struct arm_smmu_queue *q)
 	writel(q->cons, q->cons_reg);
 }
 
+static void queue_sync_cons_ovf(struct arm_smmu_queue *q)
+{
+	/* Acknowledge overflow condition if any */
+	if (Q_OVF(q, q->prod) == Q_OVF(q, q->cons))
+		return;
+
+	q->cons = Q_OVF(q, q->prod) | Q_WRP(q, q->cons) | Q_IDX(q, q->cons);
+	writel(q->cons, q->cons_reg);
+}
+
 static int queue_sync_prod(struct arm_smmu_queue *q)
 {
 	int ret = 0;
@@ -1782,7 +1792,7 @@ static irqreturn_t arm_smmu_evtq_thread(int irq, void *dev)
 	} while (!queue_empty(q));
 
 	/* Sync our overflow flag, as we believe we're up to speed */
-	q->cons = Q_OVF(q, q->prod) | Q_WRP(q, q->cons) | Q_IDX(q, q->cons);
+	queue_sync_cons_ovf(q);
 	return IRQ_HANDLED;
 }
 
@@ -1846,7 +1856,7 @@ static irqreturn_t arm_smmu_priq_thread(int irq, void *dev)
 	} while (!queue_empty(q));
 
 	/* Sync our overflow flag, as we believe we're up to speed */
-	q->cons = Q_OVF(q, q->prod) | Q_WRP(q, q->cons) | Q_IDX(q, q->cons);
+	queue_sync_cons_ovf(q);
 
 	smmu->priq.batch++;
 	wake_up_locked(&smmu->priq.wq);
