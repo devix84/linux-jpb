@@ -415,7 +415,9 @@ struct vfio_device_svm {
 	__u32	flags;
 #define VFIO_SVM_PASID_RELEASE_FLUSHED	(1 << 0)
 #define VFIO_SVM_PASID_RELEASE_CLEAN	(1 << 1)
+#define VFIO_SVM_PID			(1 << 2)
 	__u32	pasid;
+	__u32	pid;
 };
 /*
  * VFIO_DEVICE_BIND_TASK - _IOWR(VFIO_TYPE, VFIO_BASE + 22,
@@ -431,6 +433,19 @@ struct vfio_device_svm {
  *
  * On success, VFIO writes a Process Address Space ID (PASID) into @pasid. This
  * ID is unique to a device.
+ *
+ * VFIO_SVM_PID: bind task @pid instead of current task. The shared address
+ *        space identified by @pasid is that of task identified by @pid.
+ *
+ *        Given that the caller owns the device, setting this flag grants the
+ *        caller read and write permissions on the entire address space of
+ *        foreign task described by @pid. Therefore, permission to perform the
+ *        bind operation on a foreign process is governed by the ptrace access
+ *        mode PTRACE_MODE_ATTACH_REALCREDS check. See man ptrace(2) for more
+ *        information.
+ *
+ *        If the VFIO_SVM_PID flag is not set, @pid is unused and it is the
+ *        current task that is bound to the device.
  *
  * The bond between device and process must be removed with
  * VFIO_DEVICE_UNBIND_TASK before exiting.

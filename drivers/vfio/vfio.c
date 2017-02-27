@@ -26,6 +26,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/ptrace.h>
 #include <linux/rwsem.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -1660,7 +1661,7 @@ static long vfio_svm_ioctl(struct vfio_device *device, unsigned int cmd,
 	struct vfio_device_svm svm;
 	struct vfio_task *vfio_task;
 
-	minsz = offsetofend(struct vfio_device_svm, pasid);
+	minsz = offsetofend(struct vfio_device_svm, pid);
 
 	if (copy_from_user(&svm, (void __user *)arg, minsz))
 		return -EFAULT;
@@ -1669,9 +1670,39 @@ static long vfio_svm_ioctl(struct vfio_device *device, unsigned int cmd,
 		return -EINVAL;
 
 	if (cmd == VFIO_DEVICE_BIND_TASK) {
-		struct task_struct *task = current;
+		struct mm_struct *mm;
+		struct task_struct *task;
+
+		if (svm.flags & ~VFIO_SVM_PID)
+			return -EINVAL;
+
+		if (svm.flags & VFIO_SVM_PID) {
+			rcu_read_lock();
+			task = find_task_by_vpid(svm.pid);
+			if (task)
+				get_task_struct(task);
+			rcu_read_unlock();
+			if (!task)
+				return -ESRCH;
+
+			/*
+			 * Ensure process has RW access on the task's mm
+			 * FIXME:
+			 * - I think this ought to be in the IOMMU API
+			 * - I'm assuming permission is never revoked during the
+			 *   task's lifetime. Might be mistaken.
+			 */
+			mm = mm_access(task, PTRACE_MODE_ATTACH_REALCREDS);
+			if (!mm || IS_ERR(mm))
+				return IS_ERR(mm) ? PTR_ERR(mm) : -ESRCH;
+			mmput(mm);
+		} else {
+			get_task_struct(current);
+			task = current;
+		}
 
 		ret = iommu_bind_task(device->dev, task, &svm.pasid, 0, NULL);
+		put_task_struct(task);
 		if (ret)
 			return ret;
 
