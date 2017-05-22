@@ -44,6 +44,14 @@ Optional properties
 - iommu-map-mask: A mask to be applied to each Requester ID prior to being
   mapped to an IOMMU specifier per the iommu-map property.
 
+- ats-supported: if present, the root complex supports the Address
+  Translation Service (ATS). It is able to interpret the AT field in PCIe
+  Transaction Layer Packets, and forward Translation Completions or
+  Invalidation Requests to endpoints.
+
+  Device drivers should not enable ATS in endpoints unless this property
+  is present.
+
 
 Example (1)
 ===========
