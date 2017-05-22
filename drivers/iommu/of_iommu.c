@@ -147,6 +147,11 @@ static int __get_pci_rid(struct pci_dev *pdev, u16 alias, void *data)
 	return iommu_spec->np == pdev->bus->dev.of_node;
 }
 
+static bool of_pci_rc_supports_ats(struct device_node *rc_node)
+{
+	return of_property_read_bool(rc_node, "ats-supported");
+}
+
 static const struct iommu_ops
 *of_pci_iommu_init(struct pci_dev *pdev, struct device_node *bridge_np)
 {
@@ -174,6 +179,9 @@ static const struct iommu_ops
 		return err == -ENODEV ? NULL : ERR_PTR(err);
 
 	ops = of_iommu_xlate(&pdev->dev, &iommu_spec);
+
+	if (!IS_ERR_OR_NULL(ops) && of_pci_rc_supports_ats(bridge_np))
+		pdev->dev.iommu_fwspec->flags |= IOMMU_FWSPEC_PCI_RC_SUPPORTS_ATS;
 
 	of_node_put(iommu_spec.np);
 	return ops;
