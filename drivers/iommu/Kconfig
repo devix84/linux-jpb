@@ -367,4 +367,15 @@ config MTK_IOMMU_V1
 
 	  if unsure, say N here.
 
+config VIRTIO_IOMMU
+	tristate "Virtio IOMMU driver"
+	depends on VIRTIO_MMIO
+	select IOMMU_API
+	select INTERVAL_TREE
+	select ARM_DMA_USE_IOMMU if ARM
+	help
+	  Para-virtualised IOMMU driver with virtio.
+
+	  Say Y here if you intend to run this kernel as a guest.
+
 endif # IOMMU_SUPPORT
