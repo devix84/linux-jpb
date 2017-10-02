@@ -43,6 +43,7 @@
 #include <linux/amba/bus.h>
 
 #include "io-pgtable.h"
+#include "io-pgtable-arm.h"
 
 /* MMIO registers */
 #define ARM_SMMU_IDR0			0x0
@@ -2170,13 +2171,46 @@ static int arm_smmu_process_init_pgtable(struct arm_smmu_process *smmu_process,
 					 struct mm_struct *mm)
 {
 	int asid;
+	unsigned long tcr;
+	unsigned long reg, par;
+	struct arm_smmu_ctx_desc *cfg = &smmu_process->ctx_desc;
 
 	asid = mm_context_get(mm);
 	if (!asid)
 		return -ENOSPC;
 
-	smmu_process->ctx_desc.asid = asid;
-	/* TODO: init the rest */
+	tcr = TCR_T0SZ(VA_BITS) | TCR_IRGN0_WBWA | TCR_ORGN0_WBWA |
+		TCR_SH0_INNER | ARM_LPAE_TCR_EPD1;
+
+	switch (PAGE_SIZE) {
+		case SZ_4K:
+			tcr |= TCR_TG0_4K;
+			break;
+		case SZ_16K:
+			tcr |= TCR_TG0_16K;
+			break;
+		case SZ_64K:
+			tcr |= TCR_TG0_64K;
+			break;
+		default:
+			WARN_ON(1);
+			return -EFAULT;
+	}
+
+	reg = read_sanitised_ftr_reg(SYS_ID_AA64MMFR0_EL1);
+	par = cpuid_feature_extract_unsigned_field(reg, ID_AA64MMFR0_PARANGE_SHIFT);
+	tcr |= par << ARM_LPAE_TCR_IPS_SHIFT;
+
+	tcr |= TCR_TBI0;
+
+	cfg->asid       = asid;
+	cfg->ttbr       = virt_to_phys(mm->pgd);
+	/*
+	 * MAIR value is pretty much constant and global, so we can just get it
+	 * from the current CPU register
+	 */
+	cfg->mair       = read_sysreg(mair_el1);
+	cfg->tcr        = tcr;
 
 	return 0;
 }
