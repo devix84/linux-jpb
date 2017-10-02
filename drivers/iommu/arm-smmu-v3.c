@@ -640,6 +640,10 @@ struct arm_smmu_strtab_cfg {
 	u32				strtab_base_cfg;
 };
 
+struct arm_smmu_asid_state {
+	struct arm_smmu_domain		*domain;
+};
+
 /* An SMMUv3 instance */
 struct arm_smmu_device {
 	struct device			*dev;
@@ -681,7 +685,8 @@ struct arm_smmu_device {
 
 #define ARM_SMMU_MAX_ASIDS		(1 << 16)
 	unsigned int			asid_bits;
-	DECLARE_BITMAP(asid_map, ARM_SMMU_MAX_ASIDS);
+	struct idr			asid_idr;
+	spinlock_t			asid_lock;
 
 #define ARM_SMMU_MAX_VMIDS		(1 << 16)
 	unsigned int			vmid_bits;
@@ -1828,7 +1833,11 @@ static void arm_smmu_domain_free(struct iommu_domain *domain)
 		struct arm_smmu_s1_cfg *cfg = &smmu_domain->s1_cfg;
 		if (cfg->num_contexts) {
 			arm_smmu_free_cd_tables(smmu_domain);
-			arm_smmu_bitmap_free(smmu->asid_map, cfg->cd.asid);
+
+			spin_lock(&smmu->asid_lock);
+			kfree(idr_find(&smmu->asid_idr, cfg->cd.asid));
+			idr_remove(&smmu->asid_idr, cfg->cd.asid);
+			spin_unlock(&smmu->asid_lock);
 		}
 	} else {
 		struct arm_smmu_s2_cfg *cfg = &smmu_domain->s2_cfg;
@@ -1844,25 +1853,48 @@ static int arm_smmu_domain_finalise_s1(struct arm_smmu_domain *smmu_domain,
 {
 	int ret;
 	int asid;
+	struct arm_smmu_asid_state *asid_state;
 	struct arm_smmu_device *smmu = smmu_domain->smmu;
 	struct arm_smmu_s1_cfg *cfg = &smmu_domain->s1_cfg;
 
-	asid = arm_smmu_bitmap_alloc(smmu->asid_map, smmu->asid_bits);
-	if (asid < 0)
-		return asid;
-
 	ret = arm_smmu_alloc_cd_tables(smmu_domain);
 	if (ret)
-		goto out_free_asid;
+		return ret;
+
+	asid_state = kzalloc(sizeof(*asid_state), GFP_KERNEL);
+	if (!asid_state) {
+		ret = -ENOMEM;
+		goto out_free_tables;
+	}
+
+	asid_state->domain = smmu_domain;
+
+	idr_preload(GFP_KERNEL);
+	spin_lock(&smmu->asid_lock);
+	asid = idr_alloc_cyclic(&smmu->asid_idr, asid_state, 0,
+				1 << smmu->asid_bits, GFP_ATOMIC);
 
 	cfg->cd.asid	= (u16)asid;
 	cfg->cd.ttbr	= pgtbl_cfg->arm_lpae_s1_cfg.ttbr[0];
 	cfg->cd.tcr	= pgtbl_cfg->arm_lpae_s1_cfg.tcr;
 	cfg->cd.mair	= pgtbl_cfg->arm_lpae_s1_cfg.mair[0];
+
+	spin_unlock(&smmu->asid_lock);
+	idr_preload_end();
+
+	if (asid < 0) {
+		ret = asid;
+		goto out_free_asid_state;
+	}
+
 	return 0;
 
-out_free_asid:
-	arm_smmu_bitmap_free(smmu->asid_map, asid);
+out_free_asid_state:
+	kfree(asid_state);
+
+out_free_tables:
+	arm_smmu_free_cd_tables(smmu_domain);
+
 	return ret;
 }
 
@@ -2505,6 +2537,9 @@ static int arm_smmu_init_strtab(struct arm_smmu_device *smmu)
 static int arm_smmu_init_structures(struct arm_smmu_device *smmu)
 {
 	int ret;
+
+	spin_lock_init(&smmu->asid_lock);
+	idr_init(&smmu->asid_idr);
 
 	ret = arm_smmu_init_queues(smmu);
 	if (ret)
