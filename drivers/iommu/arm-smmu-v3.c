@@ -2839,7 +2839,7 @@ static void arm_smmu_process_detach(struct iommu_domain *domain,
 		arm_smmu_write_ctx_desc(smmu_domain, process->pasid, NULL);
 	}
 
-	/* TODO: Invalidate ATC. */
+	arm_smmu_atc_inv_master_all(master, process->pasid);
 	/* TODO: Invalidate all mappings if last and not DVM. */
 }
 
@@ -2847,8 +2847,9 @@ static void arm_smmu_process_invalidate(struct iommu_domain *domain,
 					struct iommu_process *process,
 					unsigned long iova, size_t size)
 {
+	arm_smmu_atc_inv_domain(to_smmu_domain(domain), process->pasid,
+				iova, size);
 	/*
-	 * TODO: Invalidate ATC.
 	 * TODO: Invalidate mapping if not DVM
 	 */
 }
@@ -2871,7 +2872,7 @@ static void arm_smmu_process_exit(struct iommu_domain *domain,
 		domain->process_exit(domain, master->dev, process->pasid,
 				     domain->process_exit_token);
 
-		/* TODO: inval ATC */
+		arm_smmu_atc_inv_master_all(master, process->pasid);
 	}
 	spin_unlock(&smmu_domain->devices_lock);
 
