@@ -1731,7 +1731,7 @@ static void arm_smmu_tlb_inv_context(void *cookie)
 	if (smmu_domain->stage == ARM_SMMU_DOMAIN_S1) {
 		cmd.opcode	= smmu->features & ARM_SMMU_FEAT_E2H ?
 				  CMDQ_OP_TLBI_EL2_ASID : CMDQ_OP_TLBI_NH_ASID;
-		cmd.tlbi.asid	= smmu_domain->s1_cfg.cd.asid;
+		cmd.tlbi.asid	= READ_ONCE(smmu_domain->s1_cfg.cd.asid);
 		cmd.tlbi.vmid	= 0;
 	} else {
 		cmd.opcode	= CMDQ_OP_TLBI_S12_VMALL;
@@ -1757,7 +1757,7 @@ static void arm_smmu_tlb_inv_range_nosync(unsigned long iova, size_t size,
 	if (smmu_domain->stage == ARM_SMMU_DOMAIN_S1) {
 		cmd.opcode	= smmu->features & ARM_SMMU_FEAT_E2H ?
 				  CMDQ_OP_TLBI_EL2_VA : CMDQ_OP_TLBI_NH_VA;
-		cmd.tlbi.asid	= smmu_domain->s1_cfg.cd.asid;
+		cmd.tlbi.asid	= READ_ONCE(smmu_domain->s1_cfg.cd.asid);
 	} else {
 		cmd.opcode	= CMDQ_OP_TLBI_S2_IPA;
 		cmd.tlbi.vmid	= smmu_domain->s2_cfg.vmid;
@@ -2119,7 +2119,9 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 	} else if (smmu_domain->stage == ARM_SMMU_DOMAIN_S1) {
 		ste->s1_cfg = &smmu_domain->s1_cfg;
 		ste->s2_cfg = NULL;
+		spin_lock(&smmu->asid_lock);
 		arm_smmu_write_ctx_desc(smmu_domain, 0, &ste->s1_cfg->cd);
+		spin_unlock(&smmu->asid_lock);
 	} else {
 		ste->s1_cfg = NULL;
 		ste->s2_cfg = &smmu_domain->s2_cfg;
@@ -2253,14 +2255,57 @@ static int arm_smmu_process_share(struct arm_smmu_domain *smmu_domain,
 				  struct arm_smmu_process *smmu_process)
 {
 	int asid, ret;
-	struct arm_smmu_asid_state *asid_state;
+	struct arm_smmu_asid_state *asid_state, *new_state;
 	struct arm_smmu_device *smmu = smmu_domain->smmu;
 
 	asid = smmu_process->ctx_desc.asid;
 
 	asid_state = idr_find(&smmu->asid_idr, asid);
 	if (asid_state && asid_state->domain) {
-		return -EEXIST;
+		struct arm_smmu_domain *smmu_domain = asid_state->domain;
+		struct arm_smmu_cmdq_ent cmd = {
+			.opcode = smmu->features & ARM_SMMU_FEAT_E2H ?
+				CMDQ_OP_TLBI_EL2_ASID : CMDQ_OP_TLBI_NH_ASID,
+		};
+
+		new_state = kzalloc(sizeof(*new_state), GFP_ATOMIC);
+		if (!new_state)
+			return -ENOMEM;
+
+		new_state->domain = smmu_domain;
+
+		ret = idr_alloc_cyclic(&smmu->asid_idr, new_state, 0,
+				       1 << smmu->asid_bits, GFP_ATOMIC);
+		if (ret < 0) {
+			kfree(new_state);
+			return ret;
+		}
+
+		/*
+		 * Race with unmap; TLB invalidations will start targeting the
+		 * new ASID, which isn't assigned yet. We'll do an
+		 * invalidate-all on the old ASID later, so it doesn't matter.
+		 */
+		WRITE_ONCE(smmu_domain->s1_cfg.cd.asid, ret);
+
+		/*
+		 * Update ASID and invalidate CD in all associated masters.
+		 * There will be some overlapping between use of both ASIDs,
+		 * until we invalidate the TLB.
+		 */
+		arm_smmu_write_ctx_desc(smmu_domain, 0, &smmu_domain->s1_cfg.cd);
+
+		/* Invalidate TLB entries previously associated with that domain */
+		cmd.tlbi.asid = asid;
+		arm_smmu_cmdq_issue_cmd(smmu, &cmd);
+		cmd.opcode = CMDQ_OP_CMD_SYNC;
+		arm_smmu_cmdq_issue_cmd(smmu, &cmd);
+
+		asid_state->domain = NULL;
+		asid_state->refs = 1;
+
+		return 0;
+
 	} else if (asid_state) {
 		asid_state->refs++;
 		return 0;
