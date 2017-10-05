@@ -223,3 +223,34 @@ static void iommu_process_detach_locked(struct iommu_context *context,
 	if (last)
 		iommu_context_free(context);
 }
+
+/**
+ * iommu_set_process_exit_handler() - set a callback for stopping the use of
+ * PASID in a device.
+ * @dev: the device
+ * @handler: exit handler
+ * @token: user data, will be passed back to the exit handler
+ *
+ * Users of the bind/unbind API should call this function to set a
+ * device-specific callback telling them when a process is exiting.
+ *
+ * After the callback returns, the device must not issue any more transaction
+ * with the PASIDs given as argument to the handler. It can be a single PASID
+ * value or the special IOMMU_PROCESS_EXIT_ALL.
+ *
+ * The handler itself should return 0 on success, and an appropriate error code
+ * otherwise.
+ */
+void iommu_set_process_exit_handler(struct device *dev,
+				    iommu_process_exit_handler_t handler,
+				    void *token)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+
+	if (WARN_ON(!domain))
+		return;
+
+	domain->process_exit = handler;
+	domain->process_exit_token = token;
+}
+EXPORT_SYMBOL_GPL(iommu_set_process_exit_handler);

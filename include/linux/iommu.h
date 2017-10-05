@@ -56,6 +56,11 @@ struct notifier_block;
 typedef int (*iommu_fault_handler_t)(struct iommu_domain *,
 			struct device *, unsigned long, int, void *);
 
+/* All process are being detached from this device */
+#define IOMMU_PROCESS_EXIT_ALL			(-1)
+typedef int (*iommu_process_exit_handler_t)(struct iommu_domain *, struct device *dev,
+					    int pasid, void *);
+
 struct iommu_domain_geometry {
 	dma_addr_t aperture_start; /* First address that can be mapped    */
 	dma_addr_t aperture_end;   /* Last address that can be mapped     */
@@ -92,6 +97,8 @@ struct iommu_domain {
 	unsigned long pgsize_bitmap;	/* Bitmap of page sizes in use */
 	iommu_fault_handler_t handler;
 	void *handler_token;
+	iommu_process_exit_handler_t process_exit;
+	void *process_exit_token;
 	struct iommu_domain_geometry geometry;
 	void *iova_cookie;
 
@@ -721,5 +728,17 @@ const struct iommu_ops *iommu_ops_from_fwnode(struct fwnode_handle *fwnode)
 }
 
 #endif /* CONFIG_IOMMU_API */
+
+#ifdef CONFIG_IOMMU_PROCESS
+extern void iommu_set_process_exit_handler(struct device *dev,
+					   iommu_process_exit_handler_t cb,
+					   void *token);
+#else /* CONFIG_IOMMU_PROCESS */
+static inline void iommu_set_process_exit_handler(struct device *dev,
+						  iommu_process_exit_handler_t cb,
+						  void *token)
+{
+}
+#endif /* CONFIG_IOMMU_PROCESS */
 
 #endif /* __LINUX_IOMMU_H */
