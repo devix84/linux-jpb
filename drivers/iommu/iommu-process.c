@@ -145,6 +145,41 @@ static void iommu_process_put_locked(struct iommu_process *process)
 	kref_put(&process->kref, iommu_process_release);
 }
 
+/**
+ * iommu_process_put - Put reference to process, freeing it if necessary.
+ */
+void iommu_process_put(struct iommu_process *process)
+{
+	spin_lock(&iommu_process_lock);
+	iommu_process_put_locked(process);
+	spin_unlock(&iommu_process_lock);
+}
+EXPORT_SYMBOL_GPL(iommu_process_put);
+
+/**
+ * iommu_process_find - Find process associated to the given PASID
+ *
+ * Returns the IOMMU process corresponding to this PASID, or NULL if not found.
+ * A reference to the iommu_process is kept, and must be released with
+ * iommu_process_put.
+ */
+struct iommu_process *iommu_process_find(int pasid)
+{
+	struct iommu_process *process;
+
+	spin_lock(&iommu_process_lock);
+	process = idr_find(&iommu_process_idr, pasid);
+	if (process) {
+		if (!iommu_process_get_locked(process))
+			/* kref is 0, process is defunct */
+			process = NULL;
+	}
+	spin_unlock(&iommu_process_lock);
+
+	return process;
+}
+EXPORT_SYMBOL_GPL(iommu_process_find);
+
 static int iommu_process_attach(struct iommu_domain *domain, struct device *dev,
 				struct iommu_process *process)
 {
