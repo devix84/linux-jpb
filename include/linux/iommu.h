@@ -454,6 +454,10 @@ int iommu_fwspec_init(struct device *dev, struct fwnode_handle *iommu_fwnode,
 void iommu_fwspec_free(struct device *dev);
 int iommu_fwspec_add_ids(struct device *dev, u32 *ids, int num_ids);
 const struct iommu_ops *iommu_ops_from_fwnode(struct fwnode_handle *fwnode);
+extern int iommu_process_bind_group(struct iommu_group *group,
+				    struct task_struct *task, int *pasid,
+				    int flags);
+extern int iommu_process_unbind_group(struct iommu_group *group, int pasid);
 
 #else /* CONFIG_IOMMU_API */
 
@@ -739,6 +743,19 @@ const struct iommu_ops *iommu_ops_from_fwnode(struct fwnode_handle *fwnode)
 	return NULL;
 }
 
+static inline int iommu_process_bind_group(struct iommu_group *group,
+					   struct task_struct *task, int *pasid,
+					   int flags)
+{
+	return -ENODEV;
+}
+
+static inline int iommu_process_unbind_group(struct iommu_group *group,
+					     int pasid)
+{
+	return -ENODEV;
+}
+
 #endif /* CONFIG_IOMMU_API */
 
 #ifdef CONFIG_IOMMU_PROCESS
@@ -747,6 +764,12 @@ extern void iommu_set_process_exit_handler(struct device *dev,
 					   void *token);
 extern struct iommu_process *iommu_process_find(int pasid);
 extern void iommu_process_put(struct iommu_process *process);
+extern int iommu_process_bind_device(struct device *dev,
+				     struct task_struct *task, int *pasid,
+				     int flags);
+extern int iommu_process_unbind_device(struct device *dev, int pasid);
+extern void __iommu_process_unbind_dev_all(struct iommu_domain *domain,
+					   struct device *dev);
 
 #else /* CONFIG_IOMMU_PROCESS */
 static inline void iommu_set_process_exit_handler(struct device *dev,
@@ -763,6 +786,24 @@ static inline struct iommu_process *iommu_process_find(int pasid)
 static inline void iommu_process_put(struct iommu_process *process)
 {
 }
+
+static inline int iommu_process_bind_device(struct device *dev,
+					    struct task_struct *task,
+					    int *pasid, int flags)
+{
+	return -ENODEV;
+}
+
+static inline int iommu_process_unbind_device(struct device *dev, int pasid)
+{
+	return -ENODEV;
+}
+
+static inline void __iommu_process_unbind_dev_all(struct iommu_domain *domain,
+						  struct device *dev)
+{
+}
+
 #endif /* CONFIG_IOMMU_PROCESS */
 
 #endif /* __LINUX_IOMMU_H */

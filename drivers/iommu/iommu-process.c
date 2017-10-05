@@ -411,6 +411,171 @@ static struct mmu_notifier_ops iommu_process_mmu_notfier = {
 };
 
 /**
+ * iommu_process_bind_device - Bind a process address space to a device
+ * @dev: the device
+ * @task: the process to bind
+ * @pasid: valid address where the PASID will be stored
+ * @flags: bond properties (IOMMU_PROCESS_BIND_*)
+ *
+ * Create a bond between device and task, allowing the device to access the
+ * process address space using the returned PASID.
+ *
+ * On success, 0 is returned and @pasid contains a valid ID. Otherwise, an error
+ * is returned.
+ */
+int iommu_process_bind_device(struct device *dev, struct task_struct *task,
+			      int *pasid, int flags)
+{
+	int err, i;
+	int nesting;
+	struct pid *pid;
+	struct iommu_domain *domain;
+	struct iommu_process *process;
+	struct iommu_context *cur_context;
+	struct iommu_context *context = NULL;
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (WARN_ON(!domain))
+		return -EINVAL;
+
+	if (!iommu_domain_get_attr(domain, DOMAIN_ATTR_NESTING, &nesting) &&
+	    nesting)
+		return -EINVAL;
+
+	pid = get_task_pid(task, PIDTYPE_PID);
+	if (!pid)
+		return -EINVAL;
+
+	/* If an iommu_process already exists, use it */
+	spin_lock(&iommu_process_lock);
+	idr_for_each_entry(&iommu_process_idr, process, i) {
+		if (process->pid != pid)
+			continue;
+
+		if (!iommu_process_get_locked(process)) {
+			/* Process is defunct, create a new one */
+			process = NULL;
+			break;
+		}
+
+		/* Great, is it also bound to this domain? */
+		list_for_each_entry(cur_context, &process->domains,
+				    process_head) {
+			if (cur_context->domain != domain)
+				continue;
+
+			context = cur_context;
+			*pasid = process->pasid;
+
+			/* Splendid, tell the driver and increase the ref */
+			err = iommu_process_attach_locked(context, dev);
+			if (err)
+				iommu_process_put_locked(process);
+
+			break;
+		}
+		break;
+	}
+	spin_unlock(&iommu_process_lock);
+	put_pid(pid);
+
+	if (context)
+		return err;
+
+	if (!process) {
+		process = iommu_process_alloc(domain, task);
+		if (IS_ERR(process))
+			return PTR_ERR(process);
+	}
+
+	err = iommu_process_attach(domain, dev, process);
+	if (err) {
+		iommu_process_put(process);
+		return err;
+	}
+
+	*pasid = process->pasid;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iommu_process_bind_device);
+
+/**
+ * iommu_process_unbind_device - Remove a bond created with
+ * iommu_process_bind_device.
+ *
+ * @dev: the device
+ * @pasid: the pasid returned by bind
+ */
+int iommu_process_unbind_device(struct device *dev, int pasid)
+{
+	struct iommu_domain *domain;
+	struct iommu_process *process;
+	struct iommu_context *cur_context;
+	struct iommu_context *context = NULL;
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (WARN_ON(!domain))
+		return -EINVAL;
+
+	/*
+	 * Caller stopped the device from issuing PASIDs, now make sure they are
+	 * out of the fault queue.
+	 */
+	iommu_fault_queue_flush(dev);
+
+	spin_lock(&iommu_process_lock);
+	process = idr_find(&iommu_process_idr, pasid);
+	if (!process) {
+		spin_unlock(&iommu_process_lock);
+		return -ESRCH;
+	}
+
+	list_for_each_entry(cur_context, &process->domains, process_head) {
+		if (cur_context->domain == domain) {
+			context = cur_context;
+			break;
+		}
+	}
+
+	if (context)
+		iommu_process_detach_locked(context, dev);
+	spin_unlock(&iommu_process_lock);
+
+	return context ? 0 : -ESRCH;
+}
+EXPORT_SYMBOL_GPL(iommu_process_unbind_device);
+
+/*
+ * __iommu_process_unbind_dev_all - Detach all processes attached to this
+ * device.
+ *
+ * When detaching @device from @domain, IOMMU drivers have to use this function.
+ */
+void __iommu_process_unbind_dev_all(struct iommu_domain *domain, struct device *dev)
+{
+	struct iommu_context *context, *next;
+
+	/* Ask device driver to stop using all PASIDs */
+	spin_lock(&iommu_process_lock);
+	if (domain->process_exit) {
+		list_for_each_entry(context, &domain->processes, domain_head)
+			domain->process_exit(domain, dev,
+					     context->process->pasid,
+					     domain->process_exit_token);
+	}
+	spin_unlock(&iommu_process_lock);
+
+	iommu_fault_queue_flush(dev);
+
+	spin_lock(&iommu_process_lock);
+	list_for_each_entry_safe(context, next, &domain->processes, domain_head)
+		iommu_process_detach_locked(context, dev);
+	spin_unlock(&iommu_process_lock);
+}
+EXPORT_SYMBOL_GPL(__iommu_process_unbind_dev_all);
+
+/**
  * iommu_set_process_exit_handler() - set a callback for stopping the use of
  * PASID in a device.
  * @dev: the device
