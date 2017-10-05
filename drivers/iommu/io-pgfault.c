@@ -21,6 +21,7 @@
 
 #include <linux/iommu.h>
 #include <linux/list.h>
+#include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 
@@ -83,8 +84,86 @@ static int iommu_fault_finish(struct iommu_domain *domain, struct device *dev,
 
 static int iommu_fault_handle_single(struct iommu_fault_context *fault)
 {
-	/* TODO */
-	return -ENODEV;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	struct iommu_process *process;
+	int ret = IOMMU_FAULT_STATUS_INVALID;
+	unsigned int access_flags = 0;
+	unsigned int fault_flags = FAULT_FLAG_REMOTE;
+	struct iommu_fault *params = &fault->params;
+
+	if (!(params->flags & IOMMU_FAULT_PASID))
+		return ret;
+
+	process = iommu_process_find(params->pasid);
+	if (!process)
+		return ret;
+
+	if ((params->flags & (IOMMU_FAULT_LAST | IOMMU_FAULT_READ |
+			      IOMMU_FAULT_WRITE)) == IOMMU_FAULT_LAST) {
+		/* Special case: PASID Stop Marker doesn't require a response */
+		ret = IOMMU_FAULT_STATUS_IGNORE;
+		goto out_put_process;
+	}
+
+	mm = process->mm;
+	if (!mmget_not_zero(mm)) {
+		/* Process is dead */
+		goto out_put_process;
+	}
+
+	down_read(&mm->mmap_sem);
+
+	vma = find_extend_vma(mm, params->address);
+	if (!vma)
+		/* Unmapped area */
+		goto out_put_mm;
+
+	if (params->flags & IOMMU_FAULT_READ)
+		access_flags |= VM_READ;
+
+	if (params->flags & IOMMU_FAULT_WRITE) {
+		access_flags |= VM_WRITE;
+		fault_flags |= FAULT_FLAG_WRITE;
+	}
+
+	if (params->flags & IOMMU_FAULT_EXEC) {
+		access_flags |= VM_EXEC;
+		fault_flags |= FAULT_FLAG_INSTRUCTION;
+	}
+
+	if (!(params->flags & IOMMU_FAULT_PRIV))
+		fault_flags |= FAULT_FLAG_USER;
+
+	if (access_flags & ~vma->vm_flags)
+		/* Access fault */
+		goto out_put_mm;
+
+	ret = handle_mm_fault(vma, params->address, fault_flags);
+	ret = ret & VM_FAULT_ERROR ? IOMMU_FAULT_STATUS_INVALID :
+		IOMMU_FAULT_STATUS_HANDLED;
+
+out_put_mm:
+	up_read(&mm->mmap_sem);
+
+	/*
+	 * Here's a fun scenario: the process exits while we're handling the
+	 * fault on its mm. Since we're the last mm_user, mmput will call
+	 * mm_exit immediately. exit_mm releases the mmu notifier, which calls
+	 * iommu_notifier_release, which has to flush the fault queue that we're
+	 * executing on... It's actually easy to reproduce with a DMA engine,
+	 * and I did observe a lockdep splat. Therefore move the release of the
+	 * mm to another thread, if we're the last user.
+	 *
+	 * mmput_async was removed in 4.14, and added back in 4.15(?)
+	 * https://patchwork.kernel.org/patch/9952257/
+	 */
+	mmput_async(mm);
+
+out_put_process:
+	iommu_process_put(process);
+
+	return ret;
 }
 
 static void iommu_fault_handle_group(struct work_struct *work)
