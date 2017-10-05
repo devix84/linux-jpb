@@ -26,9 +26,6 @@
 #include <linux/sched/mm.h>
 #include <linux/spinlock.h>
 
-/* FIXME: stub for the fault queue. Remove later. */
-#define iommu_fault_queue_flush(...)
-
 /* Link between a domain and a process */
 struct iommu_context {
 	struct iommu_process	*process;
