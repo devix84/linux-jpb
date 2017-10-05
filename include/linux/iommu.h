@@ -94,6 +94,19 @@ struct iommu_domain {
 	void *handler_token;
 	struct iommu_domain_geometry geometry;
 	void *iova_cookie;
+
+	unsigned int min_pasid, max_pasid;
+	struct list_head processes;
+};
+
+struct iommu_process {
+	struct pid		*pid;
+	int			pasid;
+	struct list_head	domains;
+	struct kref		kref;
+
+	/* Release callback for this process */
+	void (*release)(struct iommu_process *process);
 };
 
 enum iommu_cap {
@@ -164,6 +177,11 @@ struct iommu_resv_region {
  * @domain_free: free iommu domain
  * @attach_dev: attach device to an iommu domain
  * @detach_dev: detach device from an iommu domain
+ * @process_alloc: allocate iommu process
+ * @process_free: free iommu process
+ * @process_attach: attach iommu process to a domain
+ * @process_detach: detach iommu process from a domain. Remove PASID entry and
+ *                  flush associated TLB entries.
  * @map: map a physically contiguous memory region to an iommu domain
  * @unmap: unmap a physically contiguous memory region from an iommu domain
  * @map_sg: map a scatter-gather list of physically contiguous memory chunks
@@ -197,6 +215,12 @@ struct iommu_ops {
 
 	int (*attach_dev)(struct iommu_domain *domain, struct device *dev);
 	void (*detach_dev)(struct iommu_domain *domain, struct device *dev);
+	struct iommu_process *(*process_alloc)(struct task_struct *task);
+	void (*process_free)(struct iommu_process *process);
+	int (*process_attach)(struct iommu_domain *domain, struct device *dev,
+			      struct iommu_process *process, bool first);
+	void (*process_detach)(struct iommu_domain *domain, struct device *dev,
+			       struct iommu_process *process, bool last);
 	int (*map)(struct iommu_domain *domain, unsigned long iova,
 		   phys_addr_t paddr, size_t size, int prot);
 	size_t (*unmap)(struct iommu_domain *domain, unsigned long iova,
