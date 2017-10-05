@@ -25,6 +25,7 @@
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/of.h>
+#include <linux/mmu_notifier.h>
 
 #define IOMMU_READ	(1 << 0)
 #define IOMMU_WRITE	(1 << 1)
@@ -111,9 +112,13 @@ struct iommu_process {
 	int			pasid;
 	struct list_head	domains;
 	struct kref		kref;
+	struct mmu_notifier	notifier;
+	struct mm_struct	*mm;
 
 	/* Release callback for this process */
 	void (*release)(struct iommu_process *process);
+	/* For postponed release */
+	struct rcu_head		rcu;
 };
 
 enum iommu_cap {
@@ -189,6 +194,9 @@ struct iommu_resv_region {
  * @process_attach: attach iommu process to a domain
  * @process_detach: detach iommu process from a domain. Remove PASID entry and
  *                  flush associated TLB entries.
+ * @process_invalidate: Invalidate a range of mappings for a process.
+ * @process_exit: A process is exiting. Stop using the PASID, remove PASID entry
+ *                and flush associated TLB entries.
  * @map: map a physically contiguous memory region to an iommu domain
  * @unmap: unmap a physically contiguous memory region from an iommu domain
  * @map_sg: map a scatter-gather list of physically contiguous memory chunks
@@ -228,6 +236,10 @@ struct iommu_ops {
 			      struct iommu_process *process, bool first);
 	void (*process_detach)(struct iommu_domain *domain, struct device *dev,
 			       struct iommu_process *process, bool last);
+	void (*process_invalidate)(struct iommu_domain *domain,
+				   struct iommu_process *process,
+				   unsigned long iova, size_t size);
+	void (*process_exit)(struct iommu_domain *domain, struct iommu_process *process);
 	int (*map)(struct iommu_domain *domain, unsigned long iova,
 		   phys_addr_t paddr, size_t size, int prot);
 	size_t (*unmap)(struct iommu_domain *domain, unsigned long iova,
