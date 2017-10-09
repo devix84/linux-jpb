@@ -473,13 +473,10 @@ static int viommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 {
 	int i;
 	int ret = 0;
+	struct virtio_iommu_req_attach *req;
 	struct iommu_fwspec *fwspec = dev->iommu_fwspec;
 	struct viommu_endpoint *vdev = fwspec->iommu_priv;
 	struct viommu_domain *vdomain = to_viommu_domain(domain);
-	struct virtio_iommu_req_attach req = {
-		.head.type	= VIRTIO_IOMMU_T_ATTACH,
-		.address_space	= cpu_to_le32(vdomain->id),
-	};
 
 	mutex_lock(&vdomain->mutex);
 	if (!vdomain->viommu) {
@@ -531,13 +528,24 @@ static int viommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 
 	dev_dbg(dev, "attach to domain %llu\n", vdomain->id);
 
-	for (i = 0; i < fwspec->num_ids; i++) {
-		req.device = cpu_to_le32(fwspec->ids[i]);
+	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
 
-		ret = viommu_send_req_sync(vdomain->viommu, &req);
+	*req = (struct virtio_iommu_req_attach) {
+		.head.type	= VIRTIO_IOMMU_T_ATTACH,
+		.address_space	= cpu_to_le32(vdomain->id),
+	};
+
+	for (i = 0; i < fwspec->num_ids; i++) {
+		req->device = cpu_to_le32(fwspec->ids[i]);
+
+		ret = viommu_send_req_sync(vdomain->viommu, req);
 		if (ret)
 			break;
 	}
+
+	kfree(req);
 
 	vdomain->attached++;
 	vdev->vdomain = vdomain;
@@ -550,13 +558,7 @@ static int viommu_map(struct iommu_domain *domain, unsigned long iova,
 {
 	int ret;
 	struct viommu_domain *vdomain = to_viommu_domain(domain);
-	struct virtio_iommu_req_map req = {
-		.head.type	= VIRTIO_IOMMU_T_MAP,
-		.address_space	= cpu_to_le32(vdomain->id),
-		.virt_addr	= cpu_to_le64(iova),
-		.phys_addr	= cpu_to_le64(paddr),
-		.size		= cpu_to_le64(size),
-	};
+	struct virtio_iommu_req_map *req;
 
 	pr_debug("map %llu 0x%lx -> 0x%llx (%zu)\n", vdomain->id, iova,
 		 paddr, size);
@@ -564,17 +566,30 @@ static int viommu_map(struct iommu_domain *domain, unsigned long iova,
 	if (!vdomain->attached)
 		return -ENODEV;
 
-	if (prot & IOMMU_READ)
-		req.flags |= cpu_to_le32(VIRTIO_IOMMU_MAP_F_READ);
-
-	if (prot & IOMMU_WRITE)
-		req.flags |= cpu_to_le32(VIRTIO_IOMMU_MAP_F_WRITE);
-
 	ret = viommu_tlb_map(vdomain, iova, paddr, size);
 	if (ret)
 		return ret;
 
-	ret = viommu_send_req_sync(vdomain->viommu, &req);
+	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+
+	*req = (struct virtio_iommu_req_map) {
+		.head.type	= VIRTIO_IOMMU_T_MAP,
+		.address_space	= cpu_to_le32(vdomain->id),
+		.virt_addr	= cpu_to_le64(iova),
+		.phys_addr	= cpu_to_le64(paddr),
+		.size		= cpu_to_le64(size),
+	};
+
+	if (prot & IOMMU_READ)
+		req->flags |= cpu_to_le32(VIRTIO_IOMMU_MAP_F_READ);
+
+	if (prot & IOMMU_WRITE)
+		req->flags |= cpu_to_le32(VIRTIO_IOMMU_MAP_F_WRITE);
+
+	ret = viommu_send_req_sync(vdomain->viommu, req);
+	kfree(req);
 	if (ret)
 		viommu_tlb_unmap(vdomain, iova, size);
 
@@ -587,11 +602,7 @@ static size_t viommu_unmap(struct iommu_domain *domain, unsigned long iova,
 	int ret;
 	size_t unmapped;
 	struct viommu_domain *vdomain = to_viommu_domain(domain);
-	struct virtio_iommu_req_unmap req = {
-		.head.type	= VIRTIO_IOMMU_T_UNMAP,
-		.address_space	= cpu_to_le32(vdomain->id),
-		.virt_addr	= cpu_to_le64(iova),
-	};
+	struct virtio_iommu_req_unmap *req;
 
 	pr_debug("unmap %llu 0x%lx (%zu)\n", vdomain->id, iova, size);
 
@@ -603,9 +614,19 @@ static size_t viommu_unmap(struct iommu_domain *domain, unsigned long iova,
 	if (unmapped < size)
 		return 0;
 
-	req.size = cpu_to_le64(unmapped);
+	req = kzalloc(sizeof(*req), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
 
-	ret = viommu_send_req_sync(vdomain->viommu, &req);
+	*req = (struct virtio_iommu_req_unmap) {
+		.head.type	= VIRTIO_IOMMU_T_UNMAP,
+		.address_space	= cpu_to_le32(vdomain->id),
+		.virt_addr	= cpu_to_le64(iova),
+		.size		= cpu_to_le64(unmapped),
+	};
+
+	ret = viommu_send_req_sync(vdomain->viommu, req);
+	kfree(req);
 	if (ret)
 		return 0;
 
@@ -626,11 +647,15 @@ static size_t viommu_map_sg(struct iommu_domain *domain, unsigned long iova,
 	unsigned long mapped_iova;
 	size_t top_size, bottom_size;
 	struct viommu_request reqs[nents];
-	struct virtio_iommu_req_map map_reqs[nents];
+	struct virtio_iommu_req_map *map_reqs;
 	struct viommu_domain *vdomain = to_viommu_domain(domain);
 
 	if (!vdomain->attached)
 		return 0;
+
+	map_reqs = kcalloc(nents, sizeof(*map_reqs), GFP_KERNEL);
+	if (!map_reqs)
+		return -ENOMEM;
 
 	pr_debug("map_sg %llu %u 0x%lx\n", vdomain->id, nents, iova);
 
@@ -679,6 +704,7 @@ static size_t viommu_map_sg(struct iommu_domain *domain, unsigned long iova,
 
 	if (ret) {
 		viommu_tlb_unmap(vdomain, iova, total_size);
+		kfree(map_reqs);
 		return 0;
 	}
 
@@ -692,6 +718,7 @@ static size_t viommu_map_sg(struct iommu_domain *domain, unsigned long iova,
 			goto err_rollback;
 	}
 
+	kfree(map_reqs);
 	return total_size;
 
 err_rollback:
@@ -719,6 +746,7 @@ err_rollback:
 	}
 
 	viommu_tlb_unmap(vdomain, iova, total_size);
+	kfree(map_reqs);
 
 	return 0;
 }
@@ -862,6 +890,8 @@ static int viommu_probe_device(struct viommu_dev *viommu,
 		prop = (void *)probe->properties + cur;
 		type = le16_to_cpu(prop->type) & VIRTIO_IOMMU_PROBE_T_MASK;
 	}
+
+	kfree(probe);
 
 	return 0;
 }
