@@ -29,7 +29,8 @@
 #define IORT_TYPE_MASK(type)	(1 << (type))
 #define IORT_MSI_TYPE		(1 << ACPI_IORT_NODE_ITS_GROUP)
 #define IORT_IOMMU_TYPE		((1 << ACPI_IORT_NODE_SMMU) |	\
-				(1 << ACPI_IORT_NODE_SMMU_V3))
+				(1 << ACPI_IORT_NODE_SMMU_V3) | \
+				(1 << ACPI_IORT_NODE_PARAVIRT))
 
 /* Until ACPICA headers cover IORT rev. C */
 #ifndef ACPI_IORT_SMMU_V3_CAVIUM_CN99XX
@@ -759,6 +760,8 @@ static inline bool iort_iommu_driver_enabled(u8 type)
 		return IS_BUILTIN(CONFIG_ARM_SMMU_V3);
 	case ACPI_IORT_NODE_SMMU:
 		return IS_BUILTIN(CONFIG_ARM_SMMU);
+	case ACPI_IORT_NODE_PARAVIRT:
+		return IS_BUILTIN(CONFIG_VIRTIO_IOMMU);
 	default:
 		pr_warn("IORT node type %u does not describe an SMMU\n", type);
 		return false;
@@ -1003,6 +1006,11 @@ static void __init acpi_iort_register_irq(int hwirq, const char *name,
 	res->name = name;
 }
 
+static const char *arm_smmu_v3_get_name(struct acpi_iort_node *node)
+{
+	return "arm-smmu-v3";
+}
+
 static int __init arm_smmu_v3_count_resources(struct acpi_iort_node *node)
 {
 	struct acpi_iort_smmu_v3 *smmu;
@@ -1132,6 +1140,11 @@ static void  __init arm_smmu_v3_set_proximity(struct device *dev,
 #define arm_smmu_v3_set_proximity NULL
 #endif
 
+static const char *arm_smmu_get_name(struct acpi_iort_node *node)
+{
+	return "arm-smmu";
+}
+
 static int __init arm_smmu_count_resources(struct acpi_iort_node *node)
 {
 	struct acpi_iort_smmu *smmu;
@@ -1194,8 +1207,64 @@ static bool __init arm_smmu_is_coherent(struct acpi_iort_node *node)
 	return smmu->flags & ACPI_IORT_SMMU_COHERENT_WALK;
 }
 
+static const char *paravirt_get_name(struct acpi_iort_node *node)
+{
+	struct acpi_iort_pviommu *pviommu;
+
+	pviommu = (struct acpi_iort_pviommu *)node->node_data;
+
+	switch (pviommu->model) {
+	case ACPI_IORT_NODE_PV_VIRTIO_IOMMU:
+		return "virtio-mmio";
+	default:
+		return NULL;
+	}
+}
+
+static int __init paravirt_count_resources(struct acpi_iort_node *node)
+{
+	struct acpi_iort_pviommu *pviommu;
+
+	pviommu = (struct acpi_iort_pviommu *)node->node_data;
+
+	/* Mem + IRQs */
+	return 1 + pviommu->interrupt_count;
+}
+
+static void __init paravirt_init_resources(struct resource *res,
+					   struct acpi_iort_node *node)
+{
+	int i;
+	int num_res = 0;
+	int hw_irq, trigger;
+	struct acpi_iort_pviommu *pviommu;
+
+	pviommu = (struct acpi_iort_pviommu *)node->node_data;
+
+	res[num_res].start = pviommu->base_address;
+	res[num_res].end = pviommu->base_address + pviommu->span - 1;
+	res[num_res].flags = IORESOURCE_MEM;
+	num_res++;
+
+	for (i = 0; i < pviommu->interrupt_count; i++) {
+		hw_irq = IORT_IRQ_MASK(pviommu->interrupts[i]);
+		trigger = IORT_IRQ_TRIGGER_MASK(pviommu->interrupts[i]);
+
+		acpi_iort_register_irq(hw_irq, "pviommu", trigger, &res[num_res++]);
+	}
+}
+
+static bool __init paravirt_is_coherent(struct acpi_iort_node *node)
+{
+	struct acpi_iort_pviommu *pviommu;
+
+	pviommu = (struct acpi_iort_pviommu *)node->node_data;
+
+	return pviommu->flags & ACPI_IORT_NODE_PV_CACHE_COHERENT;
+}
+
 struct iort_dev_config {
-	const char *name;
+	const char *(*dev_get_name)(struct acpi_iort_node *node);
 	int (*dev_init)(struct acpi_iort_node *node);
 	bool (*dev_is_coherent)(struct acpi_iort_node *node);
 	int (*dev_count_resources)(struct acpi_iort_node *node);
@@ -1206,7 +1275,7 @@ struct iort_dev_config {
 };
 
 static const struct iort_dev_config iort_arm_smmu_v3_cfg __initconst = {
-	.name = "arm-smmu-v3",
+	.dev_get_name = arm_smmu_v3_get_name,
 	.dev_is_coherent = arm_smmu_v3_is_coherent,
 	.dev_count_resources = arm_smmu_v3_count_resources,
 	.dev_init_resources = arm_smmu_v3_init_resources,
@@ -1214,10 +1283,17 @@ static const struct iort_dev_config iort_arm_smmu_v3_cfg __initconst = {
 };
 
 static const struct iort_dev_config iort_arm_smmu_cfg __initconst = {
-	.name = "arm-smmu",
+	.dev_get_name = arm_smmu_get_name,
 	.dev_is_coherent = arm_smmu_is_coherent,
 	.dev_count_resources = arm_smmu_count_resources,
 	.dev_init_resources = arm_smmu_init_resources
+};
+
+static const struct iort_dev_config iort_paravirt_cfg __initconst = {
+	.dev_get_name = paravirt_get_name,
+	.dev_is_coherent = paravirt_is_coherent,
+	.dev_count_resources = paravirt_count_resources,
+	.dev_init_resources = paravirt_init_resources
 };
 
 static __init const struct iort_dev_config *iort_get_dev_cfg(
@@ -1228,6 +1304,8 @@ static __init const struct iort_dev_config *iort_get_dev_cfg(
 		return &iort_arm_smmu_v3_cfg;
 	case ACPI_IORT_NODE_SMMU:
 		return &iort_arm_smmu_cfg;
+	case ACPI_IORT_NODE_PARAVIRT:
+		return &iort_paravirt_cfg;
 	default:
 		return NULL;
 	}
@@ -1246,9 +1324,14 @@ static int __init iort_add_platform_device(struct acpi_iort_node *node,
 	struct platform_device *pdev;
 	struct resource *r;
 	enum dev_dma_attr attr;
+	const char *name;
 	int ret, count;
 
-	pdev = platform_device_alloc(ops->name, PLATFORM_DEVID_AUTO);
+	name = ops->dev_get_name(node);
+	if (!name)
+		return -ENODEV;
+
+	pdev = platform_device_alloc(name, PLATFORM_DEVID_AUTO);
 	if (!pdev)
 		return -ENOMEM;
 
