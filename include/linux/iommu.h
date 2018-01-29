@@ -958,6 +958,7 @@ extern int iommu_register_mm_exit_handler(struct device *dev,
 					  iommu_mm_exit_handler_t handler);
 extern int iommu_unregister_mm_exit_handler(struct device *dev);
 
+extern struct mm_struct *iommu_sva_find(int pasid);
 #else /* CONFIG_IOMMU_SVA */
 static inline int iommu_sva_device_init(struct device *dev,
 					unsigned long features,
@@ -996,6 +997,11 @@ static inline int iommu_register_mm_exit_handler(struct device *dev,
 static inline int iommu_unregister_mm_exit_handler(struct device *dev)
 {
 	return -ENODEV;
+}
+
+static inline struct mm_struct *iommu_sva_find(int pasid)
+{
+	return NULL;
 }
 #endif /* CONFIG_IOMMU_SVA */
 
