@@ -227,7 +227,7 @@ struct page_response_msg {
 	u32 pasid;
 	enum page_response_code resp_code;
 	u32 pasid_present:1;
-	u32 page_req_group_id : 9;
+	u32 page_req_group_id;
 	enum page_response_type type;
 	u32 private_data;
 };
@@ -421,7 +421,7 @@ struct iommu_fault_event {
 	enum iommu_fault_reason reason;
 	u64 addr;
 	u32 pasid;
-	u32 page_req_group_id : 9;
+	u32 page_req_group_id;
 	u32 last_req : 1;
 	u32 pasid_valid : 1;
 	u32 prot;
