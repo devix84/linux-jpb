@@ -569,3 +569,57 @@ void __iommu_sva_unbind_dev_all(struct device *dev)
 	spin_unlock(&iommu_sva_lock);
 }
 EXPORT_SYMBOL_GPL(__iommu_sva_unbind_dev_all);
+
+/**
+ * iommu_register_mm_exit_handler() - Set a callback for mm exit
+ * @dev: the device
+ * @handler: exit handler
+ *
+ * Users of the bind/unbind API should call this function to set a
+ * device-specific callback telling them when a mm is exiting.
+ *
+ * After the callback returns, the device must not issue any more transaction
+ * with the PASID given as argument to the handler. In addition the handler gets
+ * an opaque pointer corresponding to the drvdata passed as argument of bind().
+ *
+ * The handler itself should return 0 on success, and an appropriate error code
+ * otherwise.
+ */
+int iommu_register_mm_exit_handler(struct device *dev,
+				   iommu_mm_exit_handler_t handler)
+{
+	struct iommu_param *dev_param = dev->iommu_param;
+
+	if (!dev_param)
+		return -EINVAL;
+
+	/*
+	 * FIXME: racy. Same as iommu_sva_device_init, but here we'll need a
+	 * spinlock to call the mm_exit param from atomic context.
+	 */
+	if (dev_param->mm_exit)
+		return -EBUSY;
+
+	get_device(dev);
+	dev_param->mm_exit = handler;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iommu_register_mm_exit_handler);
+
+/**
+ * iommu_unregister_mm_exit_handler() - Remove mm exit callback
+ */
+int iommu_unregister_mm_exit_handler(struct device *dev)
+{
+	struct iommu_param *dev_param = dev->iommu_param;
+
+	if (!dev_param || !dev_param->mm_exit)
+		return -EINVAL;
+
+	dev_param->mm_exit = NULL;
+	put_device(dev);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iommu_unregister_mm_exit_handler);
