@@ -60,6 +60,11 @@ typedef int (*iommu_fault_handler_t)(struct iommu_domain *,
 			struct device *, unsigned long, int, void *);
 typedef int (*iommu_dev_fault_handler_t)(struct iommu_fault_event *, void *);
 
+/* Request PASID support */
+#define IOMMU_SVA_FEAT_PASID		(1 << 0)
+/* Request I/O page fault support */
+#define IOMMU_SVA_FEAT_IOPF		(1 << 1)
+
 struct iommu_domain_geometry {
 	dma_addr_t aperture_start; /* First address that can be mapped    */
 	dma_addr_t aperture_end;   /* Last address that can be mapped     */
@@ -197,6 +202,8 @@ struct page_response_msg {
  * @domain_free: free iommu domain
  * @attach_dev: attach device to an iommu domain
  * @detach_dev: detach device from an iommu domain
+ * @sva_device_init: initialize Shared Virtual Adressing for a device
+ * @sva_device_shutdown: shutdown Shared Virtual Adressing for a device
  * @map: map a physically contiguous memory region to an iommu domain
  * @unmap: unmap a physically contiguous memory region from an iommu domain
  * @map_sg: map a scatter-gather list of physically contiguous memory chunks
@@ -230,6 +237,10 @@ struct iommu_ops {
 
 	int (*attach_dev)(struct iommu_domain *domain, struct device *dev);
 	void (*detach_dev)(struct iommu_domain *domain, struct device *dev);
+	int (*sva_device_init)(struct device *dev, unsigned long features,
+			       unsigned int *min_pasid,
+			       unsigned int *max_pasid);
+	void (*sva_device_shutdown)(struct device *dev);
 	int (*map)(struct iommu_domain *domain, unsigned long iova,
 		   phys_addr_t paddr, size_t size, int prot);
 	size_t (*unmap)(struct iommu_domain *domain, unsigned long iova,
@@ -385,6 +396,9 @@ struct iommu_fault_param {
  */
 struct iommu_param {
 	struct iommu_fault_param *fault_param;
+	unsigned long sva_features;
+	unsigned int min_pasid;
+	unsigned int max_pasid;
 };
 
 int  iommu_device_register(struct iommu_device *iommu);
@@ -877,5 +891,23 @@ const struct iommu_ops *iommu_ops_from_fwnode(struct fwnode_handle *fwnode)
 }
 
 #endif /* CONFIG_IOMMU_API */
+
+#ifdef CONFIG_IOMMU_SVA
+extern int iommu_sva_device_init(struct device *dev, unsigned long features,
+				 unsigned int max_pasid);
+extern int iommu_sva_device_shutdown(struct device *dev);
+#else /* CONFIG_IOMMU_SVA */
+static inline int iommu_sva_device_init(struct device *dev,
+					unsigned long features,
+					unsigned int max_pasid)
+{
+	return -ENODEV;
+}
+
+static inline int iommu_sva_device_shutdown(struct device *dev)
+{
+	return -ENODEV;
+}
+#endif /* CONFIG_IOMMU_SVA */
 
 #endif /* __LINUX_IOMMU_H */
