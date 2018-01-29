@@ -239,11 +239,18 @@
 #define STRTAB_STE_0_CFG_S2_TRANS	(6UL << STRTAB_STE_0_CFG_SHIFT)
 
 #define STRTAB_STE_0_S1FMT_SHIFT	4
-#define STRTAB_STE_0_S1FMT_LINEAR	(0UL << STRTAB_STE_0_S1FMT_SHIFT)
+#define STRTAB_STE_0_S1FMT_MASK		0x3UL
 #define STRTAB_STE_0_S1CTXPTR_SHIFT	6
 #define STRTAB_STE_0_S1CTXPTR_MASK	0x3ffffffffffUL
 #define STRTAB_STE_0_S1CDMAX_SHIFT	59
 #define STRTAB_STE_0_S1CDMAX_MASK	0x1fUL
+
+#define STRTAB_STE_1_S1DSS_SHIFT	0
+#define STRTAB_STE_1_S1DSS_MASK		0x3UL
+#define STRTAB_STE_1_S1DSS_TERMINATE	(0x0 << STRTAB_STE_1_S1DSS_SHIFT)
+#define STRTAB_STE_1_S1DSS_BYPASS	(0x1 << STRTAB_STE_1_S1DSS_SHIFT)
+#define STRTAB_STE_1_S1DSS_SSID0	(0x2 << STRTAB_STE_1_S1DSS_SHIFT)
+
 
 #define STRTAB_STE_1_S1C_CACHE_NC	0UL
 #define STRTAB_STE_1_S1C_CACHE_WBRA	1UL
@@ -601,6 +608,8 @@ struct arm_smmu_master_data {
 	struct list_head		list; /* domain->devices */
 
 	struct device			*dev;
+
+	size_t				ssid_bits;
 };
 
 /* SMMU private data for an IOMMU domain */
@@ -1108,8 +1117,11 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_device *smmu, u32 sid,
 	}
 
 	if (ste->s1_cfg) {
+		struct iommu_pasid_table_cfg *cfg = &ste->s1_cfg->tables;
+
 		BUG_ON(ste_live);
 		dst[1] = cpu_to_le64(
+			 STRTAB_STE_1_S1DSS_SSID0 |
 			 STRTAB_STE_1_S1C_CACHE_WBRA
 			 << STRTAB_STE_1_S1CIR_SHIFT |
 			 STRTAB_STE_1_S1C_CACHE_WBRA
@@ -1124,8 +1136,12 @@ static void arm_smmu_write_strtab_ent(struct arm_smmu_device *smmu, u32 sid,
 		   !(smmu->features & ARM_SMMU_FEAT_STALL_FORCE))
 			dst[1] |= cpu_to_le64(STRTAB_STE_1_S1STALLD);
 
-		val |= (ste->s1_cfg->tables.base & STRTAB_STE_0_S1CTXPTR_MASK
+		val |= (cfg->base & STRTAB_STE_0_S1CTXPTR_MASK
 		        << STRTAB_STE_0_S1CTXPTR_SHIFT) |
+			(u64)(cfg->order & STRTAB_STE_0_S1CDMAX_MASK)
+			<< STRTAB_STE_0_S1CDMAX_SHIFT |
+			(cfg->arm_smmu.s1fmt & STRTAB_STE_0_S1FMT_MASK)
+			<< STRTAB_STE_0_S1FMT_SHIFT |
 			STRTAB_STE_0_CFG_S1_TRANS;
 	}
 
@@ -1569,6 +1585,7 @@ static void arm_smmu_domain_free(struct iommu_domain *domain)
 }
 
 static int arm_smmu_domain_finalise_s1(struct arm_smmu_domain *smmu_domain,
+				       struct arm_smmu_master_data *master,
 				       struct io_pgtable_cfg *pgtbl_cfg)
 {
 	int ret;
@@ -1578,6 +1595,7 @@ static int arm_smmu_domain_finalise_s1(struct arm_smmu_domain *smmu_domain,
 	struct arm_smmu_device *smmu = smmu_domain->smmu;
 	struct iommu_pasid_table_cfg pasid_cfg = {
 		.iommu_dev		= smmu->dev,
+		.order			= master->ssid_bits,
 		.sync			= &arm_smmu_ctx_sync,
 		.arm_smmu = {
 			.stall		= !!(smmu->features & ARM_SMMU_FEAT_STALL_FORCE),
@@ -1612,6 +1630,7 @@ static int arm_smmu_domain_finalise_s1(struct arm_smmu_domain *smmu_domain,
 }
 
 static int arm_smmu_domain_finalise_s2(struct arm_smmu_domain *smmu_domain,
+				       struct arm_smmu_master_data *master,
 				       struct io_pgtable_cfg *pgtbl_cfg)
 {
 	int vmid;
@@ -1628,7 +1647,8 @@ static int arm_smmu_domain_finalise_s2(struct arm_smmu_domain *smmu_domain,
 	return 0;
 }
 
-static int arm_smmu_domain_finalise(struct iommu_domain *domain)
+static int arm_smmu_domain_finalise(struct iommu_domain *domain,
+				    struct arm_smmu_master_data *master)
 {
 	int ret;
 	unsigned long ias, oas;
@@ -1636,6 +1656,7 @@ static int arm_smmu_domain_finalise(struct iommu_domain *domain)
 	struct io_pgtable_cfg pgtbl_cfg;
 	struct io_pgtable_ops *pgtbl_ops;
 	int (*finalise_stage_fn)(struct arm_smmu_domain *,
+				 struct arm_smmu_master_data *,
 				 struct io_pgtable_cfg *);
 	struct arm_smmu_domain *smmu_domain = to_smmu_domain(domain);
 	struct arm_smmu_device *smmu = smmu_domain->smmu;
@@ -1688,7 +1709,7 @@ static int arm_smmu_domain_finalise(struct iommu_domain *domain)
 	domain->geometry.aperture_end = (1UL << ias) - 1;
 	domain->geometry.force_aperture = true;
 
-	ret = finalise_stage_fn(smmu_domain, &pgtbl_cfg);
+	ret = finalise_stage_fn(smmu_domain, master, &pgtbl_cfg);
 	if (ret < 0) {
 		free_io_pgtable_ops(pgtbl_ops);
 		return ret;
@@ -1783,7 +1804,7 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 
 	if (!smmu_domain->smmu) {
 		smmu_domain->smmu = smmu;
-		ret = arm_smmu_domain_finalise(domain);
+		ret = arm_smmu_domain_finalise(domain, master);
 		if (ret) {
 			smmu_domain->smmu = NULL;
 			goto out_unlock;
@@ -1938,6 +1959,8 @@ static int arm_smmu_add_device(struct device *dev)
 				return ret;
 		}
 	}
+
+	master->ssid_bits = min(smmu->ssid_bits, fwspec->num_pasid_bits);
 
 	group = iommu_group_get_for_dev(dev);
 	if (!IS_ERR(group)) {
