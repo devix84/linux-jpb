@@ -85,6 +85,15 @@ config IOMMU_SVA
 
 	  If unsure, say N here.
 
+config IOMMU_FAULT
+	bool "Fault handler for the IOMMU API"
+	select IOMMU_API
+	help
+	  Enable the generic fault handler for the IOMMU API, that handles
+	  recoverable page faults or inject them into guests.
+
+	  If unsure, say N here.
+
 config FSL_PAMU
 	bool "Freescale IOMMU support"
 	depends on PCI
@@ -156,6 +165,7 @@ config INTEL_IOMMU
 	select IOMMU_API
 	select IOMMU_IOVA
 	select DMAR_TABLE
+	select IOMMU_FAULT
 	help
 	  DMA remapping (DMAR) devices support enables independent address
 	  translations for Direct Memory Access (DMA) from devices.

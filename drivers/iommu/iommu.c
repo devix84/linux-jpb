@@ -798,6 +798,17 @@ int iommu_group_unregister_notifier(struct iommu_group *group,
 }
 EXPORT_SYMBOL_GPL(iommu_group_unregister_notifier);
 
+/**
+ * iommu_register_device_fault_handler() - Register a device fault handler
+ * @dev: the device
+ * @handler: the fault handler
+ * @data: private data passed as argument to the callback
+ *
+ * When an IOMMU fault event is received, call this handler with the fault event
+ * and data as argument.
+ *
+ * Return 0 if the fault handler was installed successfully, or an error.
+ */
 int iommu_register_device_fault_handler(struct device *dev,
 					iommu_dev_fault_handler_t handler,
 					void *data)
@@ -825,6 +836,13 @@ int iommu_register_device_fault_handler(struct device *dev,
 }
 EXPORT_SYMBOL_GPL(iommu_register_device_fault_handler);
 
+/**
+ * iommu_unregister_device_fault_handler() - Unregister the device fault handler
+ * @dev: the device
+ *
+ * Remove the device fault handler installed with
+ * iommu_register_device_fault_handler().
+ */
 int iommu_unregister_device_fault_handler(struct device *dev)
 {
 	struct iommu_param *idata = dev->iommu_param;
@@ -839,19 +857,6 @@ int iommu_unregister_device_fault_handler(struct device *dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(iommu_unregister_device_fault_handler);
-
-
-int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
-{
-	/* we only report device fault if there is a handler registered */
-	if (!dev->iommu_param || !dev->iommu_param->fault_param ||
-		!dev->iommu_param->fault_param->handler)
-		return -ENOSYS;
-
-	return dev->iommu_param->fault_param->handler(evt,
-						dev->iommu_param->fault_param->data);
-}
-EXPORT_SYMBOL_GPL(iommu_report_device_fault);
 
 /**
  * iommu_group_id - Return ID for a group

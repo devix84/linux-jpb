@@ -205,6 +205,7 @@ struct page_response_msg {
 	u32 resp_code:4;
 #define IOMMU_PAGE_RESP_SUCCESS	0
 #define IOMMU_PAGE_RESP_INVALID	1
+#define IOMMU_PAGE_RESP_HANDLED	2
 #define IOMMU_PAGE_RESP_FAILURE	0xF
 
 	u32 pasid_present:1;
@@ -534,7 +535,6 @@ extern int iommu_register_device_fault_handler(struct device *dev,
 
 extern int iommu_unregister_device_fault_handler(struct device *dev);
 
-extern int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt);
 extern int iommu_page_response(struct iommu_domain *domain, struct device *dev,
 			       struct page_response_msg *msg);
 
@@ -836,11 +836,6 @@ static inline bool iommu_has_device_fault_handler(struct device *dev)
 	return false;
 }
 
-static inline int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
-{
-	return 0;
-}
-
 static inline int iommu_page_response(struct iommu_domain *domain, struct device *dev,
 				      struct page_response_msg *msg)
 {
@@ -1004,5 +999,32 @@ static inline struct mm_struct *iommu_sva_find(int pasid)
 	return NULL;
 }
 #endif /* CONFIG_IOMMU_SVA */
+
+#ifdef CONFIG_IOMMU_FAULT
+extern int iommu_fault_queue_register(struct notifier_block *flush_notifier);
+extern void iommu_fault_queue_flush(struct device *dev);
+extern void iommu_fault_queue_unregister(struct notifier_block *flush_notifier);
+extern int iommu_report_device_fault(struct device *dev,
+				     struct iommu_fault_event *evt);
+#else /* CONFIG_IOMMU_FAULT */
+static inline int iommu_fault_queue_register(struct notifier_block *flush_notifier)
+{
+	return -ENODEV;
+}
+
+static inline void iommu_fault_queue_flush(struct device *dev)
+{
+}
+
+static inline void iommu_fault_queue_unregister(struct notifier_block *flush_notifier)
+{
+}
+
+static inline int iommu_report_device_fault(struct device *dev,
+					    struct iommu_fault_event *evt)
+{
+	return 0;
+}
+#endif /* CONFIG_IOMMU_FAULT */
 
 #endif /* __LINUX_IOMMU_H */

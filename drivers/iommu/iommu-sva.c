@@ -102,9 +102,6 @@
  * the device table and PASID 0 would be available to the allocator.
  */
 
-/* TODO: stub for the fault queue. Remove later. */
-#define iommu_fault_queue_flush(...)
-
 struct iommu_bond {
 	struct io_mm		*io_mm;
 	struct device		*dev;
