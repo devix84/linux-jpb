@@ -1386,6 +1386,16 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(iommu_attach_device);
 
+int iommu_page_response(struct iommu_domain *domain, struct device *dev,
+			struct page_response_msg *msg)
+{
+	if (unlikely(!domain->ops->page_response))
+		return -ENODEV;
+
+	return domain->ops->page_response(domain, dev, msg);
+}
+EXPORT_SYMBOL_GPL(iommu_page_response);
+
 static void __iommu_detach_device(struct iommu_domain *domain,
 				  struct device *dev)
 {

@@ -159,6 +159,35 @@ struct iommu_resv_region {
 	enum iommu_resv_type	type;
 };
 
+enum page_response_type {
+	IOMMU_PAGE_STREAM_RESP = 1,
+	IOMMU_PAGE_GROUP_RESP,
+};
+
+/**
+ * Generic page response information based on PCI ATS and PASID spec.
+ * @addr: servicing page address
+ * @pasid: contains process address space ID
+ * @resp_code: response code
+ * @page_req_group_id: page request group index
+ * @type: group or stream/single page response
+ * @private_data: uniquely identify device-specific private data for an
+ *                individual page response
+ */
+struct page_response_msg {
+	u64 addr;
+	u32 pasid;
+	u32 resp_code:4;
+#define IOMMU_PAGE_RESP_SUCCESS	0
+#define IOMMU_PAGE_RESP_INVALID	1
+#define IOMMU_PAGE_RESP_FAILURE	0xF
+
+	u32 pasid_present:1;
+	u32 page_req_group_id : 9;
+	enum page_response_type type;
+	u32 private_data;
+};
+
 #ifdef CONFIG_IOMMU_API
 
 /**
@@ -238,6 +267,9 @@ struct iommu_ops {
 
 	int (*of_xlate)(struct device *dev, struct of_phandle_args *args);
 	bool (*is_attach_deferred)(struct iommu_domain *domain, struct device *dev);
+
+	int (*page_response)(struct iommu_domain *domain, struct device *dev,
+			     struct page_response_msg *msg);
 
 	unsigned long pgsize_bitmap;
 };
@@ -451,6 +483,8 @@ extern int iommu_register_device_fault_handler(struct device *dev,
 extern int iommu_unregister_device_fault_handler(struct device *dev);
 
 extern int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt);
+extern int iommu_page_response(struct iommu_domain *domain, struct device *dev,
+			       struct page_response_msg *msg);
 
 extern int iommu_group_id(struct iommu_group *group);
 extern struct iommu_group *iommu_group_get_for_dev(struct device *dev);
@@ -749,6 +783,12 @@ static inline bool iommu_has_device_fault_handler(struct device *dev)
 static inline int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
 {
 	return 0;
+}
+
+static inline int iommu_page_response(struct iommu_domain *domain, struct device *dev,
+				      struct page_response_msg *msg)
+{
+	return -ENODEV;
 }
 
 static inline int iommu_group_id(struct iommu_group *group)
