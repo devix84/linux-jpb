@@ -9,6 +9,9 @@
 
 #include <linux/iommu.h>
 
+/* TODO: stub for the fault queue. Remove later. */
+#define iommu_fault_queue_flush(...)
+
 /**
  * iommu_sva_device_init() - Initialize Shared Virtual Addressing for a device
  * @dev: the device
@@ -78,6 +81,8 @@ int iommu_sva_device_shutdown(struct device *dev)
 	if (!domain)
 		return -ENODEV;
 
+	__iommu_sva_unbind_dev_all(dev);
+
 	if (domain->ops->sva_device_shutdown)
 		domain->ops->sva_device_shutdown(dev);
 
@@ -88,3 +93,103 @@ int iommu_sva_device_shutdown(struct device *dev)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(iommu_sva_device_shutdown);
+
+/**
+ * iommu_sva_bind_device() - Bind a process address space to a device
+ * @dev: the device
+ * @mm: the mm to bind, caller must hold a reference to it
+ * @pasid: valid address where the PASID will be stored
+ * @flags: bond properties (IOMMU_SVA_FEAT_*)
+ * @drvdata: private data passed to the mm exit handler
+ *
+ * Create a bond between device and task, allowing the device to access the mm
+ * using the returned PASID. A subsequent bind() for the same device and mm will
+ * reuse the bond (and return the same PASID), but users will have to call
+ * unbind() twice.
+ *
+ * Callers should have taken care of setting up SVA for this device with
+ * iommu_sva_device_init() beforehand. They may also be notified of the bond
+ * disappearing, for example when the last task that uses the mm dies, by
+ * registering a notifier with iommu_register_mm_exit_handler().
+ *
+ * If IOMMU_SVA_FEAT_PASID is requested, a PASID is allocated and returned.
+ * TODO: The alternative, binding the non-PASID context to an mm, isn't
+ * supported at the moment because existing IOMMU domain types initialize the
+ * non-PASID context for iommu_map()/unmap() or bypass. This requires a new
+ * domain type.
+ *
+ * If IOMMU_SVA_FEAT_IOPF is not requested, the caller must pin down all
+ * mappings shared with the device. mlock() isn't sufficient, as it doesn't
+ * prevent minor page faults (e.g. copy-on-write). TODO: !IOPF isn't allowed at
+ * the moment.
+ *
+ * On success, 0 is returned and @pasid contains a valid ID. Otherwise, an error
+ * is returned.
+ */
+int iommu_sva_bind_device(struct device *dev, struct mm_struct *mm, int *pasid,
+			  unsigned long flags, void *drvdata)
+{
+	struct iommu_domain *domain;
+	struct iommu_param *dev_param = dev->iommu_param;
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (!domain)
+		return -EINVAL;
+
+	if (!pasid)
+		return -EINVAL;
+
+	if (!dev_param || (flags & ~dev_param->sva_features))
+		return -EINVAL;
+
+	if (flags != (IOMMU_SVA_FEAT_PASID | IOMMU_SVA_FEAT_IOPF))
+		return -EINVAL;
+
+	return -ENOSYS; /* TODO */
+}
+EXPORT_SYMBOL_GPL(iommu_sva_bind_device);
+
+/**
+ * iommu_sva_unbind_device() - Remove a bond created with iommu_sva_bind_device
+ * @dev: the device
+ * @pasid: the pasid returned by bind()
+ *
+ * Remove bond between device and address space identified by @pasid. Users
+ * should not call unbind() if the corresponding mm exited (as the PASID might
+ * have been reallocated to another process.)
+ *
+ * The device must not be issuing any more transaction for this PASID. All
+ * outstanding page requests for this PASID must have been flushed to the IOMMU.
+ *
+ * Returns 0 on success, or an error value
+ */
+int iommu_sva_unbind_device(struct device *dev, int pasid)
+{
+	struct iommu_domain *domain;
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (WARN_ON(!domain))
+		return -EINVAL;
+
+	/*
+	 * Caller stopped the device from issuing PASIDs, now make sure they are
+	 * out of the fault queue.
+	 */
+	iommu_fault_queue_flush(dev);
+
+	return -ENOSYS; /* TODO */
+}
+EXPORT_SYMBOL_GPL(iommu_sva_unbind_device);
+
+/**
+ * __iommu_sva_unbind_dev_all() - Detach all address spaces from this device
+ *
+ * When detaching @device from a domain, IOMMU drivers should use this helper.
+ */
+void __iommu_sva_unbind_dev_all(struct device *dev)
+{
+	iommu_fault_queue_flush(dev);
+
+	/* TODO */
+}
+EXPORT_SYMBOL_GPL(__iommu_sva_unbind_dev_all);

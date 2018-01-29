@@ -1535,6 +1535,69 @@ void iommu_detach_group(struct iommu_domain *domain, struct iommu_group *group)
 }
 EXPORT_SYMBOL_GPL(iommu_detach_group);
 
+/*
+ * iommu_sva_bind_group() - Share address space with all devices in the group.
+ * @group: the iommu group
+ * @mm: the mm to bind
+ * @pasid: valid address where the PASID will be stored
+ * @flags: bond properties (IOMMU_PROCESS_BIND_*)
+ * @drvdata: private data passed to the mm exit handler
+ *
+ * Create a bond between group and process, allowing devices in the group to
+ * access the process address space using @pasid.
+ *
+ * Refer to iommu_sva_bind_device() for more details.
+ *
+ * On success, 0 is returned and @pasid contains a valid ID. Otherwise, an error
+ * is returned.
+ */
+int iommu_sva_bind_group(struct iommu_group *group, struct mm_struct *mm,
+			 int *pasid, unsigned long flags, void *drvdata)
+{
+	struct group_device *device;
+	int ret = -ENODEV;
+
+	if (!group->domain)
+		return -EINVAL;
+
+	mutex_lock(&group->mutex);
+	list_for_each_entry(device, &group->devices, list) {
+		ret = iommu_sva_bind_device(device->dev, mm, pasid, flags,
+					    drvdata);
+		if (ret)
+			break;
+	}
+
+	if (ret) {
+		list_for_each_entry_continue_reverse(device, &group->devices, list)
+			iommu_sva_unbind_device(device->dev, *pasid);
+	}
+	mutex_unlock(&group->mutex);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(iommu_sva_bind_group);
+
+/**
+ * iommu_sva_unbind_group() - Remove a bond created with iommu_sva_bind_group()
+ * @group: the group
+ * @pasid: the pasid returned by bind
+ *
+ * Refer to iommu_sva_unbind_device() for more details.
+ */
+int iommu_sva_unbind_group(struct iommu_group *group, int pasid)
+{
+	struct group_device *device;
+
+	mutex_lock(&group->mutex);
+	list_for_each_entry(device, &group->devices, list)
+		iommu_sva_unbind_device(device->dev, pasid);
+	mutex_unlock(&group->mutex);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iommu_sva_unbind_group);
+
 phys_addr_t iommu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 {
 	if (unlikely(domain->ops->iova_to_phys == NULL))
