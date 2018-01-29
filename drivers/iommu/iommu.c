@@ -581,6 +581,12 @@ rename:
 		goto err_free_name;
 	}
 
+	dev->iommu_param = kzalloc(sizeof(*dev->iommu_param), GFP_KERNEL);
+	if (!dev->iommu_param) {
+		ret = -ENOMEM;
+		goto err_free_name;
+	}
+
 	kobject_get(group->devices_kobj);
 
 	dev->iommu_group = group;
@@ -657,7 +663,7 @@ void iommu_group_remove_device(struct device *dev)
 	sysfs_remove_link(&dev->kobj, "iommu_group");
 
 	trace_remove_device_from_group(group->id, dev);
-
+	kfree(dev->iommu_param);
 	kfree(device->name);
 	kfree(device);
 	dev->iommu_group = NULL;
@@ -790,6 +796,61 @@ int iommu_group_unregister_notifier(struct iommu_group *group,
 	return blocking_notifier_chain_unregister(&group->notifier, nb);
 }
 EXPORT_SYMBOL_GPL(iommu_group_unregister_notifier);
+
+int iommu_register_device_fault_handler(struct device *dev,
+					iommu_dev_fault_handler_t handler,
+					void *data)
+{
+	struct iommu_param *idata = dev->iommu_param;
+
+	/*
+	 * Device iommu_param should have been allocated when device is
+	 * added to its iommu_group.
+	 */
+	if (!idata)
+		return -EINVAL;
+	/* Only allow one fault handler registered for each device */
+	if (idata->fault_param)
+		return -EBUSY;
+	get_device(dev);
+	idata->fault_param =
+		kzalloc(sizeof(struct iommu_fault_param), GFP_KERNEL);
+	if (!idata->fault_param)
+		return -ENOMEM;
+	idata->fault_param->handler = handler;
+	idata->fault_param->data = data;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iommu_register_device_fault_handler);
+
+int iommu_unregister_device_fault_handler(struct device *dev)
+{
+	struct iommu_param *idata = dev->iommu_param;
+
+	if (!idata)
+		return -EINVAL;
+
+	kfree(idata->fault_param);
+	idata->fault_param = NULL;
+	put_device(dev);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iommu_unregister_device_fault_handler);
+
+
+int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
+{
+	/* we only report device fault if there is a handler registered */
+	if (!dev->iommu_param || !dev->iommu_param->fault_param ||
+		!dev->iommu_param->fault_param->handler)
+		return -ENOSYS;
+
+	return dev->iommu_param->fault_param->handler(evt,
+						dev->iommu_param->fault_param->data);
+}
+EXPORT_SYMBOL_GPL(iommu_report_device_fault);
 
 /**
  * iommu_group_id - Return ID for a group

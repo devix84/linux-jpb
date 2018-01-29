@@ -444,6 +444,14 @@ extern int iommu_group_register_notifier(struct iommu_group *group,
 					 struct notifier_block *nb);
 extern int iommu_group_unregister_notifier(struct iommu_group *group,
 					   struct notifier_block *nb);
+extern int iommu_register_device_fault_handler(struct device *dev,
+					iommu_dev_fault_handler_t handler,
+					void *data);
+
+extern int iommu_unregister_device_fault_handler(struct device *dev);
+
+extern int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt);
+
 extern int iommu_group_id(struct iommu_group *group);
 extern struct iommu_group *iommu_group_get_for_dev(struct device *dev);
 extern struct iommu_domain *iommu_group_default_domain(struct iommu_group *);
@@ -461,6 +469,12 @@ extern void iommu_domain_window_disable(struct iommu_domain *domain, u32 wnd_nr)
 
 extern int report_iommu_fault(struct iommu_domain *domain, struct device *dev,
 			      unsigned long iova, int flags);
+
+static inline bool iommu_has_device_fault_handler(struct device *dev)
+{
+	return dev->iommu_param && dev->iommu_param->fault_param &&
+		dev->iommu_param->fault_param->handler;
+}
 
 static inline void iommu_flush_tlb_all(struct iommu_domain *domain)
 {
@@ -711,6 +725,28 @@ static inline int iommu_group_register_notifier(struct iommu_group *group,
 
 static inline int iommu_group_unregister_notifier(struct iommu_group *group,
 						  struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline int iommu_register_device_fault_handler(struct device *dev,
+						iommu_dev_fault_handler_t handler,
+						void *data)
+{
+	return 0;
+}
+
+static inline int iommu_unregister_device_fault_handler(struct device *dev)
+{
+	return 0;
+}
+
+static inline bool iommu_has_device_fault_handler(struct device *dev)
+{
+	return false;
+}
+
+static inline int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
 {
 	return 0;
 }
