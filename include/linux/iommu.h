@@ -431,12 +431,13 @@ struct iommu_fault_event {
 
 /**
  * struct iommu_fault_param - per-device IOMMU fault data
- * @dev_fault_handler: Callback function to handle IOMMU faults at device level
- * @data: handler private data
- *
+ * @handler: Atomic callback to handle IOMMU faults at device level
+ * @thread: Blocking callback to handle IOMMU faults at device level
+ * @data: private data for the handler
  */
 struct iommu_fault_param {
 	iommu_dev_fault_handler_t handler;
+	iommu_dev_fault_handler_t thread;
 	void *data;
 };
 
@@ -549,6 +550,7 @@ extern int iommu_group_unregister_notifier(struct iommu_group *group,
 					   struct notifier_block *nb);
 extern int iommu_register_device_fault_handler(struct device *dev,
 					iommu_dev_fault_handler_t handler,
+					iommu_dev_fault_handler_t thread,
 					void *data);
 
 extern int iommu_unregister_device_fault_handler(struct device *dev);
@@ -574,7 +576,13 @@ extern void iommu_domain_window_disable(struct iommu_domain *domain, u32 wnd_nr)
 extern int report_iommu_fault(struct iommu_domain *domain, struct device *dev,
 			      unsigned long iova, int flags);
 
-static inline bool iommu_has_device_fault_handler(struct device *dev)
+static inline bool iommu_has_blocking_device_fault_handler(struct device *dev)
+{
+	return dev->iommu_param && dev->iommu_param->fault_param &&
+		dev->iommu_param->fault_param->thread;
+}
+
+static inline bool iommu_has_atomic_device_fault_handler(struct device *dev)
 {
 	return dev->iommu_param && dev->iommu_param->fault_param &&
 		dev->iommu_param->fault_param->handler;
@@ -839,6 +847,7 @@ static inline int iommu_group_unregister_notifier(struct iommu_group *group,
 
 static inline int iommu_register_device_fault_handler(struct device *dev,
 						iommu_dev_fault_handler_t handler,
+						iommu_dev_fault_handler_t thread,
 						void *data)
 {
 	return 0;
@@ -849,7 +858,12 @@ static inline int iommu_unregister_device_fault_handler(struct device *dev)
 	return 0;
 }
 
-static inline bool iommu_has_device_fault_handler(struct device *dev)
+static inline bool iommu_has_blocking_device_fault_handler(struct device *dev)
+{
+	return false;
+}
+
+static inline bool iommu_has_atomic_device_fault_handler(struct device *dev)
 {
 	return false;
 }

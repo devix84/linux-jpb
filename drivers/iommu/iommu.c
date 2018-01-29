@@ -801,7 +801,8 @@ EXPORT_SYMBOL_GPL(iommu_group_unregister_notifier);
 /**
  * iommu_register_device_fault_handler() - Register a device fault handler
  * @dev: the device
- * @handler: the fault handler
+ * @handler: fault handler that can only be called in atomic context
+ * @thread: fault handler called from the workqueue and can block
  * @data: private data passed as argument to the callback
  *
  * When an IOMMU fault event is received, call this handler with the fault event
@@ -810,13 +811,21 @@ EXPORT_SYMBOL_GPL(iommu_group_unregister_notifier);
  * fault, or return IOMMU_PAGE_RESP_HANDLED and complete the fault later by
  * calling iommu_page_response().
  *
+ * At least one of @handler and @thread must be non-NULL. Both may be set, in
+ * which case the top-half @thread is called from the workqueue iff the
+ * bottom-half @handler returned IOMMU_PAGE_RESP_CONTINUE.
+ *
  * Return 0 if the fault handler was installed successfully, or an error.
  */
 int iommu_register_device_fault_handler(struct device *dev,
 					iommu_dev_fault_handler_t handler,
+					iommu_dev_fault_handler_t thread,
 					void *data)
 {
 	struct iommu_param *idata = dev->iommu_param;
+
+	if (!handler && !thread)
+		return -EINVAL;
 
 	/*
 	 * Device iommu_param should have been allocated when device is
@@ -833,6 +842,7 @@ int iommu_register_device_fault_handler(struct device *dev,
 	if (!idata->fault_param)
 		return -ENOMEM;
 	idata->fault_param->handler = handler;
+	idata->fault_param->thread = thread;
 	idata->fault_param->data = data;
 
 	return 0;

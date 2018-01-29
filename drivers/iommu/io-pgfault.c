@@ -89,9 +89,19 @@ static int iommu_fault_handle_single(struct iommu_fault_context *fault)
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	unsigned int access_flags = 0;
+	struct device *dev = fault->dev;
 	int ret = IOMMU_PAGE_RESP_INVALID;
 	unsigned int fault_flags = FAULT_FLAG_REMOTE;
 	struct iommu_fault_event *evt = &fault->evt;
+
+	if (iommu_has_blocking_device_fault_handler(dev)) {
+		struct iommu_fault_param *param = dev->iommu_param->fault_param;
+
+		ret = param->thread(evt, param->data);
+		if (ret != IOMMU_PAGE_RESP_CONTINUE)
+			return ret;
+		ret = IOMMU_PAGE_RESP_INVALID;
+	}
 
 	if (!evt->pasid_valid)
 		return ret;
@@ -272,7 +282,7 @@ int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
 	 * if upper layers showed interest and installed a fault handler,
 	 * invoke it.
 	 */
-	if (iommu_has_device_fault_handler(dev)) {
+	if (iommu_has_atomic_device_fault_handler(dev)) {
 		struct iommu_fault_param *param = dev->iommu_param->fault_param;
 
 		ret = param->handler(evt, param->data);
@@ -282,7 +292,8 @@ int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
 	}
 
 	/* If the handler is blocking, handle fault in the workqueue */
-	if (evt->type == IOMMU_FAULT_PAGE_REQ)
+	if (evt->type == IOMMU_FAULT_PAGE_REQ ||
+	    iommu_has_blocking_device_fault_handler(dev))
 		ret = iommu_queue_fault(domain, dev, evt);
 
 	return iommu_fault_complete(domain, dev, evt, ret);
