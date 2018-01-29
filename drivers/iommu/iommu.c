@@ -805,7 +805,10 @@ EXPORT_SYMBOL_GPL(iommu_group_unregister_notifier);
  * @data: private data passed as argument to the callback
  *
  * When an IOMMU fault event is received, call this handler with the fault event
- * and data as argument.
+ * and data as argument. If the fault is recoverable (IOMMU_FAULT_PAGE_REQ), the
+ * handler can either return a status code (IOMMU_PAGE_RESP_*) to complete the
+ * fault, or return IOMMU_PAGE_RESP_HANDLED and complete the fault later by
+ * calling iommu_page_response().
  *
  * Return 0 if the fault handler was installed successfully, or an error.
  */

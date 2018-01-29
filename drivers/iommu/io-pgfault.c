@@ -63,6 +63,9 @@ static int iommu_fault_complete(struct iommu_domain *domain, struct device *dev,
 	if (status == IOMMU_PAGE_RESP_HANDLED)
 		return 0;
 
+	if (WARN_ON(status == IOMMU_PAGE_RESP_CONTINUE))
+		return -EINVAL;
+
 	/*
 	 * There was an internal error with handling the recoverable fault. Try
 	 * to complete the fault if possible.
@@ -272,7 +275,10 @@ int iommu_report_device_fault(struct device *dev, struct iommu_fault_event *evt)
 	if (iommu_has_device_fault_handler(dev)) {
 		struct iommu_fault_param *param = dev->iommu_param->fault_param;
 
-		return param->handler(evt, param->data);
+		ret = param->handler(evt, param->data);
+		if (ret != IOMMU_PAGE_RESP_CONTINUE)
+			return iommu_fault_complete(domain, dev, evt, ret);
+		ret = -ENOSYS;
 	}
 
 	/* If the handler is blocking, handle fault in the workqueue */

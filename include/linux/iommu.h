@@ -190,6 +190,29 @@ enum page_response_type {
 };
 
 /**
+ * enum page_response_code - Return status of fault handlers, telling the IOMMU
+ * driver how to proceed with the fault.
+ *
+ * @IOMMU_FAULT_STATUS_HANDLED: Stop processing the fault, and do not send a
+ *	reply to the device.
+ * @IOMMU_FAULT_STATUS_CONTINUE: Fault was not handled. Call the next handler,
+ *	or terminate.
+ * @IOMMU_FAULT_STATUS_SUCCESS: Fault has been handled and the page tables
+ *	populated, retry the access. This is "Success" in PCI PRI.
+ * @IOMMU_FAULT_STATUS_FAILURE: General error. Drop all subsequent faults from
+ *	this device if possible. This is "Response Failure" in PCI PRI.
+ * @IOMMU_FAULT_STATUS_INVALID: Could not handle this fault, don't retry the
+ *	access. This is "Invalid Request" in PCI PRI.
+ */
+enum page_response_code {
+	IOMMU_PAGE_RESP_HANDLED = 0,
+	IOMMU_PAGE_RESP_CONTINUE,
+	IOMMU_PAGE_RESP_SUCCESS,
+	IOMMU_PAGE_RESP_INVALID,
+	IOMMU_PAGE_RESP_FAILURE,
+};
+
+/**
  * Generic page response information based on PCI ATS and PASID spec.
  * @addr: servicing page address
  * @pasid: contains process address space ID
@@ -202,12 +225,7 @@ enum page_response_type {
 struct page_response_msg {
 	u64 addr;
 	u32 pasid;
-	u32 resp_code:4;
-#define IOMMU_PAGE_RESP_SUCCESS	0
-#define IOMMU_PAGE_RESP_INVALID	1
-#define IOMMU_PAGE_RESP_HANDLED	2
-#define IOMMU_PAGE_RESP_FAILURE	0xF
-
+	enum page_response_code resp_code;
 	u32 pasid_present:1;
 	u32 page_req_group_id : 9;
 	enum page_response_type type;
