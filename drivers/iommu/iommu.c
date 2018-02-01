@@ -586,6 +586,7 @@ rename:
 		ret = -ENOMEM;
 		goto err_free_name;
 	}
+	INIT_LIST_HEAD(&dev->iommu_param->mm_list);
 
 	kobject_get(group->devices_kobj);
 
@@ -1325,6 +1326,7 @@ static struct iommu_domain *__iommu_domain_alloc(struct bus_type *bus,
 	domain->type = type;
 	/* Assume all sizes by default; the driver may override this later */
 	domain->pgsize_bitmap  = bus->iommu_ops->pgsize_bitmap;
+	INIT_LIST_HEAD(&domain->mm_list);
 
 	return domain;
 }
