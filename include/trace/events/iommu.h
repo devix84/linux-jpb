@@ -272,6 +272,92 @@ TRACE_EVENT(sva_invalidate,
 	)
 );
 
+DECLARE_EVENT_CLASS(io_mm,
+	    TP_PROTO(struct io_mm *io_mm),
+	    TP_ARGS(io_mm),
+	    TP_STRUCT__entry(
+		__field(int, pasid)
+		__field(u64, flags)
+	    ),
+	    TP_fast_assign(
+		__entry->pasid = io_mm->pasid;
+		__entry->flags = io_mm->flags;
+	    ),
+	    TP_printk("pasid=%d flags=0x%llx",
+		__entry->pasid,
+		__entry->flags
+	    )
+);
+
+
+DEFINE_EVENT(io_mm, io_mm_alloc,
+	    TP_PROTO(struct io_mm *io_mm),
+	    TP_ARGS(io_mm)
+);
+
+DEFINE_EVENT(io_mm, io_mm_free,
+	    TP_PROTO(struct io_mm *io_mm),
+	    TP_ARGS(io_mm)
+);
+
+DECLARE_EVENT_CLASS(io_mm_dev,
+	    TP_PROTO(struct io_mm *io_mm, struct device *dev),
+	    TP_ARGS(io_mm, dev),
+	    TP_STRUCT__entry(
+		__string(dev, dev_name(dev))
+		__field(int, pasid)
+	    ),
+	    TP_fast_assign(
+		__assign_str(dev, dev_name(dev));
+		__entry->pasid = io_mm->pasid;
+	    ),
+	    TP_printk("pasid=%d dev=%s", __entry->pasid, __get_str(dev))
+);
+
+DEFINE_EVENT(io_mm_dev, io_mm_attach,
+	     TP_PROTO(struct io_mm *io_mm, struct device *dev),
+	     TP_ARGS(io_mm, dev)
+);
+
+DEFINE_EVENT(io_mm_dev, io_mm_detach,
+	     TP_PROTO(struct io_mm *io_mm, struct device *dev),
+	     TP_ARGS(io_mm, dev)
+);
+
+DEFINE_EVENT(io_mm_dev, io_mm_exit_nodetach,
+	     TP_PROTO(struct io_mm *io_mm, struct device *dev),
+	     TP_ARGS(io_mm, dev)
+);
+
+DEFINE_EVENT(io_mm_dev, io_mm_exit_detach,
+	    TP_PROTO(struct io_mm *io_mm, struct device *dev),
+	    TP_ARGS(io_mm, dev)
+);
+
+DEFINE_EVENT(io_mm, io_mm_exit,
+	     TP_PROTO(struct io_mm *io_mm),
+	     TP_ARGS(io_mm)
+);
+
+TRACE_EVENT(io_mm_invalidate,
+	    TP_PROTO(struct io_mm *io_mm, unsigned long start,
+		     unsigned long end),
+	    TP_ARGS(io_mm, start, end),
+	    TP_STRUCT__entry(
+		__field(int, pasid)
+		__field(u64, start)
+		__field(u64, end)
+	    ),
+	    TP_fast_assign(
+		__entry->pasid = io_mm->pasid;
+		__entry->start = start;
+		__entry->end = end;
+	    ),
+	    TP_printk("pasid=%d start=0x%llx end=0x%llx",
+		__entry->pasid, __entry->start, __entry->end
+	    )
+);
+
 
 #endif /* _TRACE_IOMMU_H */
 
