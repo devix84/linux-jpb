@@ -10,6 +10,7 @@
 #include <linux/iommu.h>
 #include <linux/mmu_notifier.h>
 #include <linux/module.h>
+#include <linux/random.h>
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -137,6 +138,31 @@ static DEFINE_SPINLOCK(iommu_sva_lock);
 
 static struct mmu_notifier_ops iommu_mmu_notifier;
 
+int random_alloc(unsigned int min, unsigned int max)
+{
+	int i, pasid;
+	int min_shift = min > 0 ? fls_long(min - 1) : 0;
+
+	/* Probably some boundary issue with this, I didn't think much about it */
+	max >>= min_shift;
+
+	/* Try to allocate a random PASID a few times, then abort. */
+	for (i = 0; i < 32; i++) {
+		pasid = prandom_u32_max(max + 1);
+
+		if (pasid < min) /* still required if pasid = 0 */
+			continue;
+		if (idr_find(&iommu_pasid_idr, pasid))
+			continue;
+
+		pr_debug("Allocated PASID %d in [%d:%d]\n", pasid << min_shift,
+			 1 << min_shift, max << min_shift);
+		return pasid << min_shift;
+	}
+
+	return -ENOMEM;
+}
+
 static struct io_mm *
 io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 	    struct mm_struct *mm, unsigned long flags)
@@ -171,8 +197,10 @@ io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 
 	idr_preload(GFP_KERNEL);
 	spin_lock(&iommu_sva_lock);
-	pasid = idr_alloc(&iommu_pasid_idr, io_mm, param->min_pasid,
-			  param->max_pasid + 1, GFP_ATOMIC);
+	pasid = random_alloc(param->min_pasid, param->max_pasid);
+	if (pasid >= 0)
+		pasid = idr_alloc_cyclic(&iommu_pasid_idr, io_mm, pasid, pasid +
+					 1, GFP_ATOMIC);
 	io_mm->pasid = pasid;
 	spin_unlock(&iommu_sva_lock);
 	idr_preload_end();
