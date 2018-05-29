@@ -2335,6 +2335,20 @@ arm_smmu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 	return ops->iova_to_phys(ops, iova);
 }
 
+static int arm_smmu_init_pri(struct arm_smmu_master_data *master)
+{
+	struct pci_dev *pdev;
+
+	if (!dev_is_pci(master->dev) || !master->ssid_bits)
+		return -EINVAL;
+
+	pdev = to_pci_dev(master->dev);
+	/* If the device supports PASID and PRI, set the PPAR bit in the STE */
+	master->ste.prg_resp_needs_ssid = pci_prg_resp_requires_prefix(pdev);
+
+	return 0;
+}
+
 static int arm_smmu_enable_pri(struct arm_smmu_master_data *master)
 {
 	int ret;
@@ -2364,8 +2378,6 @@ static int arm_smmu_enable_pri(struct arm_smmu_master_data *master)
 	}
 
 	master->can_fault = true;
-	master->ste.prg_resp_needs_ssid = pci_prg_resp_requires_prefix(pdev);
-
 	dev_dbg(master->dev, "enabled PRI\n");
 
 	return 0;
@@ -2712,7 +2724,8 @@ static int arm_smmu_add_device(struct device *dev)
 		master->ste.can_stall = true;
 	}
 
-	arm_smmu_enable_ats(master);
+	if (!arm_smmu_enable_ats(master))
+		arm_smmu_init_pri(master);
 
 	ret = iommu_device_link(&smmu->iommu, dev);
 	if (ret)
