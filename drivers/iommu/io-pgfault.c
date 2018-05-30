@@ -165,17 +165,22 @@ EXPORT_SYMBOL_GPL(iommu_queue_iopf);
 /**
  * iopf_queue_flush_dev - Ensure that all queued faults have been processed
  * @dev: the endpoint whose faults need to be flushed.
+ * @pasid: the PASID affected by this flush
  *
  * Users must call this function when releasing a PASID, to ensure that all
  * pending faults for this PASID have been handled, and won't hit the address
  * space of the next process that uses this PASID.
  *
+ * This function can also be called before shutting down the device, in which
+ * case @pasid should be IOMMU_PASID_INVALID.
+ *
  * Return 0 on success.
  */
-int iopf_queue_flush_dev(struct device *dev)
+int iopf_queue_flush_dev(struct device *dev, int pasid)
 {
 	int ret = 0;
 	struct iopf_queue *queue;
+	struct iopf_fault *fault, *next;
 	struct iommu_param *param = dev->iommu_param;
 
 	if (!param)
@@ -205,14 +210,30 @@ int iopf_queue_flush_dev(struct device *dev)
 	if (ret)
 		return ret;
 
-	queue->flush(queue->flush_arg, dev);
+	/*
+	 * When removing a PASID, the device driver tells the device to stop
+	 * using it, and flush any pending fault to the IOMMU. In this flush
+	 * callback, the IOMMU driver makes sure that there are no such faults
+	 * left in the low-level queue.
+	 */
+	queue->flush(queue->flush_arg, dev, pasid);
 
 	/*
-	 * No need to clear the partial list. All PRGs containing the PASID that
-	 * needs to be decommissioned are whole (the device driver made sure of
-	 * it before this function was called). They have been submitted to the
-	 * queue by the above flush().
+	 * If at some point the low-level fault queue overflowed and the IOMMU
+	 * device had to auto-respond to a 'last' page fault, other faults from
+	 * the same Page Request Group may still be stuck in the partial list.
+	 * We need to make sure that the next address space using the PASID
+	 * doesn't receive them.
 	 */
+	mutex_lock(&param->lock);
+	list_for_each_entry_safe(fault, next, &param->iopf_param->partial, head) {
+		if (fault->evt.pasid == pasid || pasid == IOMMU_PASID_INVALID) {
+			list_del(&fault->head);
+			kfree(fault);
+		}
+	}
+	mutex_unlock(&param->lock);
+
 	flush_workqueue(queue->wq);
 
 	return 0;
@@ -286,6 +307,7 @@ int iopf_queue_remove_device(struct device *dev)
 	if (!iopf_param)
 		return -EINVAL;
 
+	/* Just in case flush_dev() wasn't called properly */
 	list_for_each_entry_safe(fault, next, &iopf_param->partial, head)
 		kfree(fault);
 
