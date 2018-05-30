@@ -351,7 +351,6 @@ EXPORT_SYMBOL_GPL(iopf_queue_alloc);
  */
 void iopf_queue_free(struct iopf_queue *queue)
 {
-
 	/* Caller should have removed all producers first */
 	if (WARN_ON(!refcount_dec_and_test(&queue->refs)))
 		return;
