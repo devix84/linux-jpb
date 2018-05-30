@@ -443,7 +443,7 @@ static void iommu_notifier_release(struct mmu_notifier *mn, struct mm_struct *mm
 			dev_WARN(bond->dev, "possible leak of PASID %u",
 				 io_mm->pasid);
 
-		iopf_queue_flush_dev(bond->dev);
+		iopf_queue_flush_dev(bond->dev, io_mm->pasid);
 
 		spin_lock(&iommu_sva_lock);
 		next = list_next_entry(bond, mm_head);
@@ -719,7 +719,7 @@ int __iommu_sva_unbind_device(struct device *dev, int pasid)
 	 * Caller stopped the device from issuing PASIDs, now make sure they are
 	 * out of the fault queue.
 	 */
-	iopf_queue_flush_dev(dev);
+	iopf_queue_flush_dev(dev, pasid);
 
 	/* spin_lock_irq matches the one in wait_event_lock_irq */
 	spin_lock_irq(&iommu_sva_lock);
@@ -748,7 +748,7 @@ void __iommu_sva_unbind_dev_all(struct device *dev)
 	struct iommu_sva_param *param;
 	struct iommu_bond *bond, *next;
 
-	iopf_queue_flush_dev(dev);
+	iopf_queue_flush_dev(dev, IOMMU_PASID_INVALID);
 
 	/*
 	 * io_mm_detach_locked might wait, so we shouldn't call it with the dev
