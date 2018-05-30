@@ -298,6 +298,10 @@ unsigned long mm_context_get(struct mm_struct *mm)
 out_unlock:
 	raw_spin_unlock_irqrestore(&cpu_asid_lock, flags);
 
+	/* Set the equivalent of USER_ASID_BIT */
+	if (IS_ENABLED(CONFIG_UNMAP_KERNEL_AT_EL0))
+		asid |= 1;
+
 	return asid;
 }
 
