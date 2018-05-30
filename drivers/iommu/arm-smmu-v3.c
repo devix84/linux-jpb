@@ -1331,7 +1331,7 @@ static int arm_smmu_flush_queue(struct arm_smmu_device *smmu,
 	return ret;
 }
 
-static int arm_smmu_flush_queues(void *cookie, struct device *dev)
+static int arm_smmu_flush_queues(void *cookie, struct device *dev, int pasid)
 {
 	struct arm_smmu_master_data *master;
 	struct arm_smmu_device *smmu = cookie;
