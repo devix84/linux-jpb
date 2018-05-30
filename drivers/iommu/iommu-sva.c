@@ -153,6 +153,7 @@ io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 	io_mm->mm		= mm;
 	io_mm->release		= domain->ops->mm_free;
 	INIT_LIST_HEAD(&io_mm->devices);
+	/* Leave kref to zero until the io_mm is fully initialized */
 
 	idr_preload(GFP_KERNEL);
 	spin_lock(&iommu_sva_lock);
@@ -174,7 +175,7 @@ io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 	spin_unlock(&iommu_sva_lock);
 
 err_free_mm:
-	domain->ops->mm_free(io_mm);
+	io_mm->release(io_mm);
 	mmdrop(mm);
 
 	return ERR_PTR(ret);
@@ -195,8 +196,9 @@ static void io_mm_release(struct kref *kref)
 	io_mm = container_of(kref, struct io_mm, kref);
 	WARN_ON(!list_empty(&io_mm->devices));
 
+	/* The PASID can now be reallocated for another mm. */
 	idr_remove(&iommu_pasid_idr, io_mm->pasid);
-
+	/* ... but this mm is freed after a grace period (TODO) */
 	io_mm_free(io_mm);
 }
 
@@ -288,13 +290,13 @@ static void io_mm_detach_locked(struct iommu_bond *bond)
 		}
 	}
 
-	domain->ops->mm_detach(domain, bond->dev, bond->io_mm, detach_domain);
-
 	list_del(&bond->mm_head);
 	list_del(&bond->domain_head);
 	list_del(&bond->dev_head);
-	io_mm_put_locked(bond->io_mm);
 
+	domain->ops->mm_detach(domain, bond->dev, bond->io_mm, detach_domain);
+
+	io_mm_put_locked(bond->io_mm);
 	kfree(bond);
 }
 
@@ -406,9 +408,9 @@ int __iommu_sva_bind_device(struct device *dev, struct mm_struct *mm,
 			    int *pasid, unsigned long flags, void *drvdata)
 {
 	int i, ret = 0;
+	struct iommu_bond *bond;
 	struct io_mm *io_mm = NULL;
 	struct iommu_domain *domain;
-	struct iommu_bond *bond = NULL, *tmp;
 	struct iommu_sva_param *param = dev->iommu_param->sva_param;
 
 	domain = iommu_get_domain_for_dev(dev);
@@ -427,9 +429,9 @@ int __iommu_sva_bind_device(struct device *dev, struct mm_struct *mm,
 	idr_for_each_entry(&iommu_pasid_idr, io_mm, i) {
 		if (io_mm->mm == mm && io_mm_get_locked(io_mm)) {
 			/* ... Unless it's already bound to this device */
-			list_for_each_entry(tmp, &io_mm->devices, mm_head) {
-				if (tmp->dev == dev) {
-					bond = tmp;
+			list_for_each_entry(bond, &io_mm->devices, mm_head) {
+				if (bond->dev == dev) {
+					ret = -EEXIST;
 					io_mm_put_locked(io_mm);
 					break;
 				}
@@ -438,9 +440,8 @@ int __iommu_sva_bind_device(struct device *dev, struct mm_struct *mm,
 		}
 	}
 	spin_unlock(&iommu_sva_lock);
-
-	if (bond)
-		return -EEXIST;
+	if (ret)
+		return ret;
 
 	/* Require identical features within an io_mm for now */
 	if (io_mm && (flags != io_mm->flags)) {
