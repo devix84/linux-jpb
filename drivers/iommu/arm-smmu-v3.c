@@ -597,7 +597,7 @@ struct arm_smmu_master_data {
 	struct arm_smmu_strtab_ent	ste;
 
 	struct arm_smmu_domain		*domain;
-	struct list_head		list; /* domain->devices */
+	struct list_head		domain_head;
 
 	struct device			*dev;
 };
@@ -1702,7 +1702,7 @@ static void arm_smmu_detach_dev(struct device *dev)
 
 	if (smmu_domain) {
 		spin_lock_irqsave(&smmu_domain->devices_lock, flags);
-		list_del(&master->list);
+		list_del(&master->domain_head);
 		spin_unlock_irqrestore(&smmu_domain->devices_lock, flags);
 
 		master->domain = NULL;
@@ -1754,7 +1754,7 @@ static int arm_smmu_attach_dev(struct iommu_domain *domain, struct device *dev)
 	master->domain = smmu_domain;
 
 	spin_lock_irqsave(&smmu_domain->devices_lock, flags);
-	list_add(&master->list, &smmu_domain->devices);
+	list_add(&master->domain_head, &smmu_domain->devices);
 	spin_unlock_irqrestore(&smmu_domain->devices_lock, flags);
 
 	if (smmu_domain->stage == ARM_SMMU_DOMAIN_BYPASS) {
