@@ -2322,6 +2322,12 @@ int iommu_sva_bind_device(struct device *dev, struct mm_struct *mm, int *pasid,
 
 	/* Ensure device count and domain don't change while we're binding */
 	mutex_lock(&group->mutex);
+
+	/*
+	 * IOMMU groups with more than one device aren't supported for SVA at
+	 * the moment. It is difficult to implement cleanly and not worth the
+	 * effort.
+	 */
 	if (iommu_group_device_count(group) != 1)
 		goto out_unlock;
 
