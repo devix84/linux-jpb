@@ -35,16 +35,16 @@ struct iopf_device_param {
 	struct list_head		partial;
 };
 
-struct iopf_context {
-	struct device			*dev;
+struct iopf_fault {
 	struct iommu_fault_event	evt;
 	struct list_head		head;
 };
 
 struct iopf_group {
-	struct iopf_context		last_fault;
+	struct iopf_fault		last_fault;
 	struct list_head		faults;
 	struct work_struct		work;
+	struct device			*dev;
 };
 
 static int iopf_complete(struct device *dev, struct iommu_fault_event *evt,
@@ -63,7 +63,7 @@ static int iopf_complete(struct device *dev, struct iommu_fault_event *evt,
 }
 
 static enum page_response_code
-iopf_handle_single(struct iopf_context *fault)
+iopf_handle_single(struct iopf_fault *fault)
 {
 	/* TODO */
 	return -ENODEV;
@@ -72,7 +72,7 @@ iopf_handle_single(struct iopf_context *fault)
 static void iopf_handle_group(struct work_struct *work)
 {
 	struct iopf_group *group;
-	struct iopf_context *fault, *next;
+	struct iopf_fault *fault, *next;
 	enum page_response_code status = IOMMU_PAGE_RESP_SUCCESS;
 
 	group = container_of(work, struct iopf_group, work);
@@ -90,7 +90,7 @@ static void iopf_handle_group(struct work_struct *work)
 			kfree(fault);
 	}
 
-	iopf_complete(group->last_fault.dev, &group->last_fault.evt, status);
+	iopf_complete(group->dev, &group->last_fault.evt, status);
 	kfree(group);
 }
 
@@ -104,7 +104,7 @@ static void iopf_handle_group(struct work_struct *work)
 int iommu_queue_iopf(struct iommu_fault_event *evt, void *cookie)
 {
 	struct iopf_group *group;
-	struct iopf_context *fault, *next;
+	struct iopf_fault *fault, *next;
 	struct iopf_device_param *iopf_param;
 
 	struct device *dev = cookie;
@@ -131,7 +131,6 @@ int iommu_queue_iopf(struct iommu_fault_event *evt, void *cookie)
 			return -ENOMEM;
 
 		fault->evt = *evt;
-		fault->dev = dev;
 
 		/* Non-last request of a group. Postpone until the last one */
 		list_add(&fault->head, &iopf_param->partial);
@@ -143,8 +142,8 @@ int iommu_queue_iopf(struct iommu_fault_event *evt, void *cookie)
 	if (!group)
 		return -ENOMEM;
 
+	group->dev = dev;
 	group->last_fault.evt = *evt;
-	group->last_fault.dev = dev;
 	INIT_LIST_HEAD(&group->faults);
 	list_add(&group->last_fault.head, &group->faults);
 	INIT_WORK(&group->work, iopf_handle_group);
@@ -270,7 +269,7 @@ EXPORT_SYMBOL_GPL(iopf_queue_add_device);
  */
 int iopf_queue_remove_device(struct device *dev)
 {
-	struct iopf_context *fault, *next;
+	struct iopf_fault *fault, *next;
 	struct iopf_device_param *iopf_param;
 	struct iommu_param *param = dev->iommu_param;
 
