@@ -115,7 +115,7 @@ int iommu_queue_iopf(struct iommu_fault_event *evt, void *cookie)
 
 	if (evt->type != IOMMU_FAULT_PAGE_REQ)
 		/* Not a recoverable page fault */
-		return IOMMU_PAGE_RESP_CONTINUE;
+		return 0;
 
 	/*
 	 * As long as we're holding param->lock, the queue can't be unlinked
@@ -135,7 +135,7 @@ int iommu_queue_iopf(struct iommu_fault_event *evt, void *cookie)
 		/* Non-last request of a group. Postpone until the last one */
 		list_add(&fault->head, &iopf_param->partial);
 
-		return IOMMU_PAGE_RESP_HANDLED;
+		return 0;
 	}
 
 	group = kzalloc(sizeof(*group), GFP_KERNEL);
@@ -158,7 +158,7 @@ int iommu_queue_iopf(struct iommu_fault_event *evt, void *cookie)
 	queue_work(iopf_param->queue->wq, &group->work);
 
 	/* Postpone the fault completion */
-	return IOMMU_PAGE_RESP_HANDLED;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(iommu_queue_iopf);
 
