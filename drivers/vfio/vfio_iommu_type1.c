@@ -1328,13 +1328,14 @@ static int vfio_iommu_bind_group(struct vfio_iommu *iommu,
 
 	ret = iommu_group_for_each_dev(group->iommu_group, &data,
 				       vfio_iommu_sva_bind_dev);
-	if (ret && data.count > 1)
+	if (ret) {
 		iommu_group_for_each_dev(group->iommu_group, vfio_mm,
 					 vfio_iommu_sva_unbind_dev);
-	if (ret && enabled_sva) {
-		iommu_group_for_each_dev(group->iommu_group, NULL,
-					 vfio_iommu_sva_shutdown);
-		group->sva_enabled = false;
+		if (enabled_sva) {
+			iommu_group_for_each_dev(group->iommu_group, NULL,
+						 vfio_iommu_sva_shutdown);
+			group->sva_enabled = false;
+		}
 	}
 
 	return ret;
