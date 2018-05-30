@@ -2337,7 +2337,7 @@ arm_smmu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 
 static int arm_smmu_enable_pri(struct arm_smmu_master_data *master)
 {
-	int ret, pos;
+	int ret;
 	struct pci_dev *pdev;
 	/*
 	 * TODO: find a good inflight PPR number. We should divide the PRI queue
