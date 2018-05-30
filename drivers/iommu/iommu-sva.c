@@ -347,7 +347,7 @@ static void io_mm_detach_locked(struct iommu_bond *bond, bool wait)
 		 * wait until it finishes using the bond.
 		 *
 		 * refs is guaranteed to be one or more, otherwise it would
-		 * already have been removed from the list. Check is someone is
+		 * already have been removed from the list. Check if someone is
 		 * already waiting, in which case we wait but do not free.
 		 */
 		if (refcount_read(&bond->refs) > 1)
