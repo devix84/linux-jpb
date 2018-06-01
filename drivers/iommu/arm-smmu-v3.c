@@ -1397,7 +1397,7 @@ static void __arm_smmu_sync_cd(struct arm_smmu_domain *smmu_domain,
 static void arm_smmu_sync_cd(void *cookie, int ssid, bool leaf)
 {
 	struct arm_smmu_cmdq_ent cmd = {
-		.opcode	= CMDQ_OP_CFGI_CD_ALL,
+		.opcode	= CMDQ_OP_CFGI_CD,
 		.cfgi	= {
 			.ssid	= ssid,
 			.leaf	= leaf,
