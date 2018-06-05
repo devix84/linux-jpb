@@ -25,6 +25,9 @@
 
 #include <uapi/linux/virtio_iommu.h>
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/virtio_iommu.h>
+
 #define MSI_IOVA_BASE			0x8000000
 #define MSI_IOVA_LENGTH			0x100000
 
@@ -697,8 +700,10 @@ static int viommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 	 *
 	 * vdev->vdomain is protected by group->mutex
 	 */
-	if (vdev->vdomain)
+	if (vdev->vdomain) {
 		vdev->vdomain->nr_endpoints--;
+		dev_info(dev, "detached from vdomain %d\n", vdev->vdomain->id);
+	}
 
 	req = (struct virtio_iommu_req_attach) {
 		.head.type	= VIRTIO_IOMMU_T_ATTACH,
@@ -725,6 +730,9 @@ static int viommu_attach_dev(struct iommu_domain *domain, struct device *dev)
 
 	vdomain->nr_endpoints++;
 	vdev->vdomain = vdomain;
+
+	dev_info(dev, "attached to vdomain %d, viommu %s\n", vdomain->id,
+		 dev_name(vdomain->viommu->dev));
 
 	return 0;
 }
@@ -762,6 +770,8 @@ static int viommu_map(struct iommu_domain *domain, unsigned long iova,
 	if (ret)
 		viommu_del_mappings(vdomain, iova, size);
 
+	trace_viommu_map(vdomain->viommu->dev, vdomain->id, iova,
+			 iova + size - 1, paddr, prot);
 	return ret;
 }
 
@@ -789,6 +799,7 @@ static size_t viommu_unmap(struct iommu_domain *domain, unsigned long iova,
 	};
 
 	ret = viommu_add_req(vdomain->viommu, &unmap, sizeof(unmap));
+	trace_viommu_unmap(vdomain->viommu->dev, vdomain->id, iova, size);
 	return ret ? 0 : unmapped;
 }
 
