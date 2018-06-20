@@ -1291,8 +1291,6 @@ static struct virtio_driver virtio_iommu_drv = {
 
 module_virtio_driver(virtio_iommu_drv);
 
-IOMMU_OF_DECLARE(viommu, "virtio,mmio");
-
 MODULE_DESCRIPTION("Virtio IOMMU driver");
 MODULE_AUTHOR("Jean-Philippe Brucker <jean-philippe.brucker@arm.com>");
 MODULE_LICENSE("GPL v2");
