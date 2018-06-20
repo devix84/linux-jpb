@@ -2819,6 +2819,7 @@ void pci_request_acs(void)
 {
 	pci_acs_enable = 1;
 }
+EXPORT_SYMBOL_GPL(pci_request_acs);
 
 /**
  * pci_std_enable_acs - enable ACS on devices using standard ACS capabilites
