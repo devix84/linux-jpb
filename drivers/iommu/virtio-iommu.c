@@ -79,6 +79,7 @@ struct viommu_endpoint {
 	struct viommu_dev		*viommu;
 	struct viommu_domain		*vdomain;
 	struct list_head		resv_regions;
+	struct device_link		*link;
 };
 
 struct viommu_request {
@@ -911,6 +912,10 @@ static int viommu_add_device(struct device *dev)
 	INIT_LIST_HEAD(&vdev->resv_regions);
 	fwspec->iommu_priv = vdev;
 
+	vdev->link = device_link_add(dev, viommu->dev, 0);
+	if (!vdev->link)
+		return -ENODEV;
+
 	if (viommu->probe_size) {
 		/* Get additional information for this endpoint */
 		ret = viommu_probe_endpoint(viommu, dev);
@@ -959,6 +964,7 @@ static void viommu_remove_device(struct device *dev)
 	iommu_group_remove_device(dev);
 	iommu_device_unlink(&vdev->viommu->iommu, dev);
 	viommu_put_resv_regions(dev, &vdev->resv_regions);
+	device_link_del(vdev->link);
 	kfree(vdev);
 }
 
