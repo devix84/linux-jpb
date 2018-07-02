@@ -15266,6 +15266,7 @@ F:	include/uapi/linux/virtio_input.h
 
 VIRTIO IOMMU DRIVER
 M:	Jean-Philippe Brucker <jean-philippe.brucker@arm.com>
+L:	virtualization@lists.linux-foundation.org
 S:	Maintained
 F:	drivers/iommu/virtio-iommu.c
 F:	include/uapi/linux/virtio_iommu.h
