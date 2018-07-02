@@ -97,13 +97,4 @@ struct virtio_iommu_req_unmap {
 	struct virtio_iommu_req_tail		tail;
 };
 
-union virtio_iommu_req {
-	struct virtio_iommu_req_head		head;
-
-	struct virtio_iommu_req_attach		attach;
-	struct virtio_iommu_req_detach		detach;
-	struct virtio_iommu_req_map		map;
-	struct virtio_iommu_req_unmap		unmap;
-};
-
 #endif
