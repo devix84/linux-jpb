@@ -148,10 +148,11 @@ struct virtio_iommu_req_probe {
 
 struct virtio_iommu_fault {
 	__u8					reason;
-	__u8					padding[3];
+	__u8					reserved[3];
 	__le32					flags;
 	__le32					endpoint;
+	__le32					pasid;
 	__le64					address;
-} __packed;
+};
 
 #endif
