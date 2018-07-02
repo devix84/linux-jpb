@@ -426,10 +426,8 @@ static int viommu_add_resv_mem(struct viommu_endpoint *vdev,
 
 	switch (mem->subtype) {
 	default:
-		if (mem->subtype != VIRTIO_IOMMU_RESV_MEM_T_RESERVED &&
-		    mem->subtype != VIRTIO_IOMMU_RESV_MEM_T_MSI)
-			dev_warn(vdev->dev, "unknown resv mem subtype 0x%x\n",
-				 mem->subtype);
+		dev_warn(vdev->dev, "unknown resv mem subtype 0x%x\n",
+			 mem->subtype);
 		/* Fall-through */
 	case VIRTIO_IOMMU_RESV_MEM_T_RESERVED:
 		region = iommu_alloc_resv_region(start, size, 0,
@@ -481,20 +479,20 @@ static int viommu_probe_endpoint(struct viommu_dev *viommu, struct device *dev)
 
 	while (type != VIRTIO_IOMMU_PROBE_T_NONE &&
 	       cur < viommu->probe_size) {
-		len = le16_to_cpu(prop->length);
+		len = le16_to_cpu(prop->length) + sizeof(*prop);
 
 		switch (type) {
 		case VIRTIO_IOMMU_PROBE_T_RESV_MEM:
-			ret = viommu_add_resv_mem(vdev, (void *)prop->value, len);
+			ret = viommu_add_resv_mem(vdev, (void *)prop, len);
 			break;
 		default:
-			dev_dbg(dev, "unknown viommu prop 0x%x\n", type);
+			dev_err(dev, "unknown viommu prop 0x%x\n", type);
 		}
 
 		if (ret)
 			dev_err(dev, "failed to parse viommu prop 0x%x\n", type);
 
-		cur += sizeof(*prop) + len;
+		cur += len;
 		if (cur >= viommu->probe_size)
 			break;
 

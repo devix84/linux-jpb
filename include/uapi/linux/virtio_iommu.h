@@ -102,16 +102,6 @@ struct virtio_iommu_req_unmap {
 	struct virtio_iommu_req_tail		tail;
 };
 
-#define VIRTIO_IOMMU_RESV_MEM_T_RESERVED	0
-#define VIRTIO_IOMMU_RESV_MEM_T_MSI		1
-
-struct virtio_iommu_probe_resv_mem {
-	__u8					subtype;
-	__u8					reserved[3];
-	__le64					start;
-	__le64					end;
-} __packed;
-
 #define VIRTIO_IOMMU_PROBE_T_NONE		0
 #define VIRTIO_IOMMU_PROBE_T_RESV_MEM		1
 
@@ -120,8 +110,18 @@ struct virtio_iommu_probe_resv_mem {
 struct virtio_iommu_probe_property {
 	__le16					type;
 	__le16					length;
-	__u8					value[];
-} __packed;
+};
+
+#define VIRTIO_IOMMU_RESV_MEM_T_RESERVED	0
+#define VIRTIO_IOMMU_RESV_MEM_T_MSI		1
+
+struct virtio_iommu_probe_resv_mem {
+	struct virtio_iommu_probe_property	head;
+	__u8					subtype;
+	__u8					reserved[3];
+	__le64					start;
+	__le64					end;
+};
 
 struct virtio_iommu_req_probe {
 	struct virtio_iommu_req_head		head;
@@ -130,7 +130,10 @@ struct virtio_iommu_req_probe {
 
 	__u8					properties[];
 
-	/* Tail follows the variable-length properties array (no padding) */
-} __packed;
+	/*
+	 * Tail follows the variable-length properties array. No padding,
+	 * property lengths are all aligned on 8 bytes.
+	 */
+};
 
 #endif
