@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /*
- * Virtio-iommu definition v0.7
+ * Virtio-iommu definition v0.8
  *
  * Copyright (C) 2018 Arm Ltd.
  */
@@ -25,7 +25,7 @@ struct virtio_iommu_config {
 	} input_range;
 	/* Max domain ID size */
 	__u8					domain_bits;
-} __packed;
+};
 
 /* Request types */
 #define VIRTIO_IOMMU_T_ATTACH			0x01
@@ -46,31 +46,27 @@ struct virtio_iommu_config {
 struct virtio_iommu_req_head {
 	__u8					type;
 	__u8					reserved[3];
-} __packed;
+};
 
 struct virtio_iommu_req_tail {
 	__u8					status;
 	__u8					reserved[3];
-} __packed;
+};
 
 struct virtio_iommu_req_attach {
 	struct virtio_iommu_req_head		head;
-
 	__le32					domain;
 	__le32					endpoint;
-	__le32					reserved;
-
+	__u8					reserved[8];
 	struct virtio_iommu_req_tail		tail;
-} __packed;
+};
 
 struct virtio_iommu_req_detach {
 	struct virtio_iommu_req_head		head;
-
 	__le32					endpoint;
-	__le32					reserved;
-
+	__u8					reserved[4];
 	struct virtio_iommu_req_tail		tail;
-} __packed;
+};
 
 #define VIRTIO_IOMMU_MAP_F_READ			(1 << 0)
 #define VIRTIO_IOMMU_MAP_F_WRITE		(1 << 1)
@@ -84,26 +80,22 @@ struct virtio_iommu_req_detach {
 
 struct virtio_iommu_req_map {
 	struct virtio_iommu_req_head		head;
-
 	__le32					domain;
 	__le64					virt_start;
 	__le64					virt_end;
 	__le64					phys_start;
 	__le32					flags;
-
 	struct virtio_iommu_req_tail		tail;
-} __packed;
+};
 
 struct virtio_iommu_req_unmap {
 	struct virtio_iommu_req_head		head;
-
 	__le32					domain;
 	__le64					virt_start;
 	__le64					virt_end;
-	__le32					reserved;
-
+	__u8					reserved[4];
 	struct virtio_iommu_req_tail		tail;
-} __packed;
+};
 
 union virtio_iommu_req {
 	struct virtio_iommu_req_head		head;
