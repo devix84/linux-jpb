@@ -1,0 +1,61 @@
+* virtio IOMMU PCI device
+
+When virtio-iommu uses the PCI transport, it is described as a child node
+of the PCI root complex where the programming interface resides. The
+translation component of the IOMMU may reside outside the root complex and
+manage endpoints on a parent bus. The operating systems discovers the
+IOMMU topology with standard iommu-map and iommus properties pointing to
+the programming interface node.
+
+** Required properties:
+- compatible: Should be "virtio,pci-iommu"
+- reg: PCI address of the IOMMU. As defined in "PCI Bus Binding to: IEEE
+  Std 1275-1994", the reg property is a five-cell address encoded as
+  (phys.hi phys.mid phys.lo size.hi size.lo). phys.hi should contain the
+  device's BDF as 0b00000000 bbbbbbbb dddddfff 00000000. The other cells
+  should be zero.
+- #iommu-cells: each DMA master managed by the IOMMU is assigned an
+  endpoint ID, described by the "iommus" property as specified in
+  devicetree/bindings/iommu/iommu.txt. For virtio-iommu, #iommu-cells must
+  be 1.
+
+** Notes:
+- The unit-address may be represented as a 16-bit Requester ID.
+- DMA from the IOMMU device isn't managed by another IOMMU. Therefore the
+  virtio-iommu node doesn't have an "iommus" property, and is omitted from
+  the iommu-map property of the root complex.
+
+** Example:
+
+pcie@10000000 {
+	...
+
+	/* The IOMMU programming interface uses slot 00:01.0 */
+	iommu0: iommu@0008 {
+		compatible = "virtio,pci-iommu";
+		reg = <0x00000800 0 0 0 0>;
+		#iommu-cells = <1>;
+	};
+
+	/*
+	 * The IOMMU manages all functions in this domain except itself.
+	 * Omit BDF 00:01.0.
+	 */
+	iommu-map = <0x0 &iommu0 0x0 0x8>
+		    <0x9 &iommu0 0x9 0xfff7>;
+};
+
+pcie@20000000 {
+	...
+	/*
+	 * The IOMMU also manages all functions from this domain,
+	 * with endpoint IDs 0x10000 - 0x1ffff
+	 */
+	iommu-map = <0x0 &iommu0 0x10000 0x10000>;
+};
+
+ethernet@fe001000 {
+	...
+	/* The IOMMU manages this platform device with endpoint ID 0x20000 */
+	iommus = <&iommu0 0x20000>;
+};
