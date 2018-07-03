@@ -998,11 +998,24 @@ static int viommu_fill_evtq(struct viommu_dev *viommu)
 	return 0;
 }
 
+static struct fwnode_handle *viommu_get_fwnode(struct device *dev)
+{
+	if (!dev->fwnode && dev->of_node)
+		/*
+		 * When using DT and virtio-pci, virtio-iommu is described as a
+		 * child of the RC. pci_set_of_node initialized the fwnode.
+		 */
+		dev->fwnode = &dev->of_node->fwnode;
+
+	return dev->fwnode;
+}
+
 static int viommu_probe(struct virtio_device *vdev)
 {
 	struct device *parent_dev = vdev->dev.parent;
 	struct viommu_dev *viommu = NULL;
 	struct device *dev = &vdev->dev;
+	struct fwnode_handle *fwnode;
 	u64 input_start = 0;
 	u64 input_end = -1UL;
 	int ret;
@@ -1069,8 +1082,15 @@ static int viommu_probe(struct virtio_device *vdev)
 		goto err_free_vqs;
 
 	iommu_device_set_ops(&viommu->iommu, &viommu_ops);
-	iommu_device_set_fwnode(&viommu->iommu, parent_dev->fwnode);
+	fwnode = viommu_get_fwnode(parent_dev);
+	if (!fwnode) {
+		dev_err(&vdev->dev, "no firmware node for device %s\n",
+			dev_name(parent_dev));
+		ret = -ENODEV;
+		goto err_sysfs_remove;
+	}
 
+	iommu_device_set_fwnode(&viommu->iommu, fwnode);
 	iommu_device_register(&viommu->iommu);
 
 #ifdef CONFIG_PCI
@@ -1103,8 +1123,9 @@ static int viommu_probe(struct virtio_device *vdev)
 	return 0;
 
 err_unregister:
-	iommu_device_sysfs_remove(&viommu->iommu);
 	iommu_device_unregister(&viommu->iommu);
+err_sysfs_remove:
+	iommu_device_sysfs_remove(&viommu->iommu);
 err_free_vqs:
 	vdev->config->del_vqs(vdev);
 
@@ -1156,6 +1177,7 @@ static struct virtio_driver virtio_iommu_drv = {
 module_virtio_driver(virtio_iommu_drv);
 
 IOMMU_OF_DECLARE(viommu, "virtio,mmio");
+IOMMU_OF_DECLARE(viommu_pci, "virtio,pci-iommu");
 
 MODULE_DESCRIPTION("Virtio IOMMU driver");
 MODULE_AUTHOR("Jean-Philippe Brucker <jean-philippe.brucker@arm.com>");
