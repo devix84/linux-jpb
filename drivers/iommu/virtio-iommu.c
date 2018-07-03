@@ -7,6 +7,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/acpi_iort.h>
 #include <linux/amba/bus.h>
 #include <linux/delay.h>
 #include <linux/dma-iommu.h>
@@ -1006,6 +1007,9 @@ static struct fwnode_handle *viommu_get_fwnode(struct device *dev)
 		 * child of the RC. pci_set_of_node initialized the fwnode.
 		 */
 		dev->fwnode = &dev->of_node->fwnode;
+	else if (!dev->fwnode)
+		/* Our last hope, get the fwnode from ACPI IORT */
+		dev->fwnode = iort_get_pci_iommu_fwnode(dev);
 
 	return dev->fwnode;
 }
