@@ -849,13 +849,12 @@ static void smmute_transaction_set_state(struct smmute_transaction *transaction,
 		break;
 
 	case TRANSACTION_NOTIFIED:
-		expect = TRANSACTION_INFLIGHT | TRANSACTION_FINISHED;
+		expect = TRANSACTION_INFLIGHT;
 		trace_smmute_transaction_notify(transaction);
 		break;
 
 	case TRANSACTION_FINISHED:
-		expect = TRANSACTION_NOTIFIED | TRANSACTION_FINISHED |
-			 TRANSACTION_INFLIGHT;
+		expect = TRANSACTION_NOTIFIED;
 		trace_smmute_transaction_finish(transaction);
 		break;
 
@@ -922,10 +921,13 @@ static int smmute_transaction_launch(struct smmute_device *smmute,
 
 	if (readl_relaxed(&user_frame->cmd) != transaction->command) {
 		/*
-		 * If write "failed", no MSI will be generated. Set 'finished' and
-		 * run away. result_get will handle the mess.
+		 * If write "failed", no MSI will be generated. Set 'notified'
+		 * and run away. If the TestEngine was really fast, then an MSI
+		 * has been generated. result_get will handle the mess.
 		 */
-		smmute_transaction_set_state(transaction, TRANSACTION_FINISHED);
+		if (smmute_msi_free(smmute, transaction))
+			smmute_transaction_set_state(transaction,
+						     TRANSACTION_NOTIFIED);
 	}
 
 	return 0;
