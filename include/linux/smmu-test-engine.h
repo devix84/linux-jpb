@@ -131,6 +131,11 @@ struct smmute_msi_info {
 	u32				data;
 };
 
+struct smmute_msi_pool {
+	spinlock_t			lock;
+	struct list_head		transactions;
+};
+
 struct smmute_device {
 	/*
 	 * Pairs of 64kB pages, each containing 512 user frames in the first
@@ -153,19 +158,13 @@ struct smmute_device {
 
 	size_t				nr_msix_entries;
 
-	/*
-	 * bitmap of the MSIs that have been associated to an IRQ.
-	 * This allows to request them on demand, instead of hogging all
-	 * possible (1024) IRQs for each device.
-	 */
-	unsigned long			*requested_msis;
+	struct smmute_msi_pool		*msi_pools;
+	unsigned int			current_pool;
 
 	struct kmem_cache		*dma_regions_cache;
 	struct kmem_cache		*transaction_cache;
 	struct kmem_cache		*file_desc_cache;
 
-	/* bitmap of the MSIs currently reserved for transactions */
-	unsigned long			*reserved_msis;
 	/* bitmap of the frames currently reserved by transactions */
 	unsigned long			*reserved_frames;
 	/* Common lock for frames and MSIs */
@@ -176,10 +175,6 @@ struct smmute_device {
 	 * collections and index them with unique IDs. */
 	struct kset			*files;
 	atomic64_t			files_ida;
-
-	/* shortcut for MSI handler, maps irqs to transactions */
-	struct rb_root			irq_map;
-	spinlock_t			irq_map_lock;
 
 	struct kset			*tasks;
 
@@ -274,8 +269,8 @@ struct smmute_transaction {
 	unsigned int			command;
 
 	unsigned int			msi;
-	int				irq;
 	unsigned long			frame;
+	struct smmute_uframe		*uframe;
 
 	atomic_t			state;
 
@@ -297,8 +292,8 @@ struct smmute_transaction {
 
 	/* index into smmute_file_desc.transactions */
 	struct list_head		list;
-	/* index into smmute_device.irq_map */
-	struct rb_node			node;
+	/* index into smmute_msi_pool.transactions */
+	struct list_head		msi_head;
 
 	struct kobject			kobj;
 };

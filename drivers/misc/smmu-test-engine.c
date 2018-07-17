@@ -35,6 +35,8 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/smmute.h>
 
+#define SMMUTE_MAX_MSIS		8
+
 static void smmute_dma_release(struct kobject *kobj);
 static void smmute_dma_put(struct smmute_dma *dma);
 struct kobj_type smmute_dma_ktype = {
@@ -144,11 +146,6 @@ static void smmute_uframe_dump(size_t idx, struct smmute_uframe *frame)
 	pr_info("--------------------------------------\n");
 }
 
-static irqreturn_t smmute_msi_handler(int irq, void *opaque)
-{
-	return IRQ_WAKE_THREAD;
-}
-
 static void smmute_transaction_set_state(struct smmute_transaction *transaction,
 					 enum smmute_transaction_state state);
 
@@ -156,123 +153,68 @@ static void smmute_transaction_set_state(struct smmute_transaction *transaction,
 	(dev_is_pci((smmute)->dev) ? (smmute)->msix_entries[idx].vector :	\
 	 (smmute)->plat_msi_entries[idx].vector)
 
-static irqreturn_t smmute_msi_thread(int irq, void *opaque)
+static irqreturn_t smmute_msi_handler(int irq, void *opaque)
 {
-	struct smmute_device *smmute = opaque;
-	struct device *dev = smmute->dev;
-	struct rb_node *node;
+	u32 hwstate;
+	struct smmute_msi_pool *pool = opaque;
+	struct smmute_transaction *tsac, *next;
 
-	BUG_ON(!smmute);
-
-	dev_dbg(dev, "IRQ%d handler\n", irq);
-
-	spin_lock(&smmute->irq_map_lock);
-
-	node = smmute->irq_map.rb_node;
-
-	while (node) {
-		struct smmute_transaction *cur = rb_entry(node,
-				struct smmute_transaction, node);
-
-		if (cur->irq < irq)
-			node = node->rb_right;
-		else if (cur->irq > irq)
-			node = node->rb_left;
-		else {
-			smmute_transaction_set_state(cur, TRANSACTION_NOTIFIED);
-			wake_up_interruptible(&cur->fd->transaction_wait);
-			break;
+	spin_lock(&pool->lock);
+	/* Signal all finished transactions */
+	list_for_each_entry_safe(tsac, next, &pool->transactions, msi_head) {
+		hwstate = readl_relaxed(&tsac->uframe->cmd);
+		if (atomic_read(&tsac->state) == TRANSACTION_INFLIGHT &&
+		    hwstate != tsac->command) {
+			list_del_init(&tsac->msi_head);
+			smmute_transaction_set_state(tsac, TRANSACTION_NOTIFIED);
+			wake_up_interruptible(&tsac->fd->transaction_wait);
 		}
 	}
-	spin_unlock(&smmute->irq_map_lock);
-
-	if (!node) {
-		/*
-		 * This could mean that the transaction was already cleaned by a
-		 * result_get_bulk call, for instance. No harm done.
-		 */
-		dev_dbg(dev, "could not find transaction (and that's fine)\n");
-		return IRQ_HANDLED;
-	}
-
+	spin_unlock(&pool->lock);
 
 	return IRQ_HANDLED;
 }
 
 /**
- * smmute_irq_request - request an IRQ, associate it to a reserved MSI
- *
- * resources_mutex must be held
- */
-static int smmute_irq_request(struct smmute_device *smmute, size_t idx)
-{
-	int ret;
-	unsigned long vector = smmute_get_msi_vector(smmute, idx);
-
-	if (idx >= smmute->nr_msix_entries)
-		return -EINVAL;
-
-	if (WARN_ON(!test_bit(idx, smmute->reserved_msis)))
-		/* MSI needs to be reserved first */
-		return -EINVAL;
-
-	if (WARN_ON(test_bit(idx, smmute->requested_msis)))
-		return -EINVAL;
-
-	dev_dbg(smmute->dev, "requesting IRQ%zu (vec %lu)\n", idx, vector);
-
-	ret = devm_request_threaded_irq(smmute->dev, vector, smmute_msi_handler,
-					smmute_msi_thread, 0, DRV_NAME, smmute);
-	if (ret)
-		return ret;
-
-	set_bit(idx, smmute->requested_msis);
-
-	return 0;
-}
-
-/**
- * smmute_msi_alloc - reserve an MSI for a transaction
- *
- * Look for a free MSI (one that isn't in use by any other transaction),
- * reserve it atomically, and request an IRQ if necessary.
- *
- * The request is only performed if that MSI has never been used before. We'll
- * keep the IRQ around until the device is released.
+ * smmute_msi_alloc - allocate an MSI for a transaction
  *
  * return the allocated MSI number (>= 0), or an error
  */
-static long smmute_msi_alloc(struct smmute_device *smmute)
+static int smmute_msi_alloc(struct smmute_device *smmute,
+			     struct smmute_transaction *tsac)
 {
-	int ret;
-	long msi;
+	struct smmute_msi_pool *pool;
 	unsigned long nr_msis = smmute->nr_msix_entries;
 
-	/* Alloc first available MSI */
 	mutex_lock(&smmute->resources_mutex);
+	pool = &smmute->msi_pools[smmute->current_pool];
 
-	msi = find_first_zero_bit(smmute->reserved_msis, nr_msis);
-	if (msi == smmute->nr_msix_entries) {
-		dev_err(smmute->dev, "no MSI available\n");
-		mutex_unlock(&smmute->resources_mutex);
-		return -EBUSY;
-	}
-	set_bit(msi, smmute->reserved_msis);
+	spin_lock_irq(&pool->lock);
+	list_add_tail(&tsac->msi_head, &pool->transactions);
+	spin_unlock_irq(&pool->lock);
 
+	tsac->msi = smmute->current_pool;
+	smmute->current_pool = (smmute->current_pool + 1) % nr_msis;
 	mutex_unlock(&smmute->resources_mutex);
 
-	if (!test_bit(msi, smmute->requested_msis)) {
-		/* note to self: don't request an IRQ while in_atomic. */
-		ret = smmute_irq_request(smmute, msi);
-		if (ret) {
-			BUG_ON(ret > 0);
+	return tsac->msi;
+}
 
-			clear_bit(msi, smmute->reserved_msis);
-			return ret;
-		}
+static bool smmute_msi_free(struct smmute_device *smmute,
+			    struct smmute_transaction *tsac)
+{
+	bool deleted = false;
+	struct smmute_msi_pool *pool = &smmute->msi_pools[tsac->msi];
+
+	spin_lock_irq(&pool->lock);
+	/* Clean up if the MSI handler didn't already */
+	if (!list_empty(&tsac->msi_head)) {
+		deleted = true;
+		list_del_init(&tsac->msi_head);
 	}
+	spin_unlock_irq(&pool->lock);
 
-	return msi;
+	return deleted;
 }
 
 /**
@@ -296,49 +238,6 @@ static long smmute_frame_alloc(struct smmute_device *smmute)
 	mutex_unlock(&smmute->resources_mutex);
 
 	return frame;
-}
-
-static int smmute_irq_map_insert(struct smmute_device *smmute,
-				 struct smmute_transaction *transaction)
-{
-	int ret = 0;
-	struct rb_node **new;
-	struct rb_node *parent = NULL;
-
-	spin_lock_bh(&smmute->irq_map_lock);
-
-	new = &(smmute->irq_map.rb_node);
-
-	while (*new) {
-		struct smmute_transaction *this = rb_entry(*new,
-				struct smmute_transaction, node);
-		parent = *new;
-		if (this->irq > transaction->irq) {
-			new = &((*new)->rb_left);
-		} else if (this->irq < transaction->irq) {
-			new = &((*new)->rb_right);
-		} else {
-			ret = -EINVAL;
-			break;
-		}
-	}
-
-	if (!ret) {
-		rb_link_node(&transaction->node, parent, new);
-		rb_insert_color(&transaction->node, &smmute->irq_map);
-	}
-
-	spin_unlock_bh(&smmute->irq_map_lock);
-
-	return ret;
-}
-
-static void smmute_irq_map_destroy(struct smmute_device *smmute,
-				   struct smmute_transaction *transaction)
-{
-	spin_lock_bh(&smmute->irq_map_lock);
-	rb_erase(&transaction->node, &smmute->irq_map);
-	spin_unlock_bh(&smmute->irq_map_lock);
 }
 
 /**
@@ -367,59 +266,45 @@ smmute_transaction_alloc(struct smmute_file_desc *fd)
 	if (!transaction)
 		return ERR_PTR(-ENOMEM);
 
-	msi = smmute_msi_alloc(smmute);
-	if (msi < 0) {
-		ret = msi;
-		goto err_free_transaction;
-	}
-
 	frame = smmute_frame_alloc(smmute);
 	if (frame < 0) {
 		ret = frame;
-		goto err_release_msi;
+		goto err_free_transaction;
 	}
 
 	atomic_set(&transaction->state, TRANSACTION_INVALID);
 
 	transaction->id = atomic64_inc_return(&smmute_transactions_ida);
 	transaction->frame = frame;
-	transaction->msi = msi;
 	transaction->fd = fd;
+	transaction->uframe = smmute_user_frame(smmute->pairs, frame);
+
+	msi = smmute_msi_alloc(smmute, transaction);
+	if (msi < 0) {
+		ret = msi;
+		goto err_release_frame;
+	}
 
 	ret = kobject_init_and_add(&transaction->kobj, &smmute_transaction_ktype,
 				   &fd->kobj, "%llu", transaction->id);
 	if (ret) {
 		dev_err(smmute->dev, "could not create kobject\n");
-		goto err_release_frame;
+		goto err_release_msi;
 	}
 
 	mutex_lock(&fd->transactions_mutex);
 	list_add(&transaction->list, &fd->transactions);
 	mutex_unlock(&fd->transactions_mutex);
 
-	transaction->irq = smmute_get_msi_vector(smmute, msi);
-	ret = smmute_irq_map_insert(smmute, transaction);
-	if (ret) {
-		dev_err(smmute->dev, "could not insert IRQ map\n");
-		goto err_remove_transaction;
-	}
-
 	dev_dbg(smmute->dev, "allocated transaction %p\n", transaction);
 
 	return transaction;
 
-err_remove_transaction:
-	mutex_lock(&fd->transactions_mutex);
-	list_del(&transaction->list);
-	mutex_unlock(&fd->transactions_mutex);
-
-	kobject_del(&transaction->kobj);
+err_release_msi:
+	smmute_msi_free(smmute, transaction);
 
 err_release_frame:
 	clear_bit(frame, smmute->reserved_frames);
-
-err_release_msi:
-	clear_bit(msi, smmute->reserved_msis);
 
 err_free_transaction:
 	kmem_cache_free(smmute->transaction_cache, transaction);
@@ -435,14 +320,12 @@ static void smmute_transaction_release(struct kobject *kobj)
 	struct smmute_file_desc *fd = transaction->fd;
 	struct smmute_device *smmute = fd->smmute;
 
-	smmute_irq_map_destroy(smmute, transaction);
-
 	smmute_transaction_set_state(transaction, TRANSACTION_INVALID);
 
 	smmute_dma_put(transaction->dma_in);
 	smmute_dma_put(transaction->dma_out);
 
-	clear_bit(transaction->msi, smmute->reserved_msis);
+	smmute_msi_free(smmute, transaction);
 	clear_bit(transaction->frame, smmute->reserved_frames);
 
 	list_del(&transaction->list);
@@ -828,11 +711,9 @@ smmute_user_frame_init(struct smmute_device *smmute,
 		       struct smmute_transaction *transaction)
 {
 	size_t i = 0;
-	struct smmute_uframe *frame;
+	struct smmute_uframe *frame = transaction->uframe;
 	dma_addr_t iova_in = transaction->dma_in->iova + transaction->offset_in;
 	dma_addr_t iova_out = 0;
-
-	frame = smmute_user_frame(smmute->pairs, transaction->frame);
 
 	if (transaction->dma_out)
 		iova_out = transaction->dma_out->iova + transaction->offset_out;
@@ -1086,8 +967,7 @@ retry_wait:
 		}
 	}
 
-	frame = smmute_user_frame(smmute->pairs, transaction->frame);
-
+	frame = transaction->uframe;
 	status = readl_relaxed(&frame->cmd);
 	if (status == transaction->command) {
 		/* Transaction is still running */
@@ -1118,6 +998,12 @@ retry_wait:
 		break;
 	}
 
+	/*
+	 * There is a small chance of getting false positives here. If the MSI
+	 * is masked in the MSI-X table (being serviced by the handler), then
+	 * the TestEngine sets MSI_ABORTED. I could observe this when MSIs were
+	 * handed in a thread.
+	 */
 	if (readl_relaxed(&frame->uctrl) & SMMUTE_UCTRL_MSI_ABORTED)
 		dev_warn(smmute->dev, "MSI aborted\n");
 
@@ -2270,7 +2156,8 @@ static int smmute_pci_msi_enable(struct pci_dev *pdev)
 	dev_dbg(&pdev->dev, "max number of MSI-X vectors: %d\n",
 			pci_msix_vec_count(pdev));
 
-	nr_msis = smmute->nr_pairs * SMMUTE_FRAMES_PER_PAGE;
+	nr_msis = min_t(size_t, SMMUTE_MAX_MSIS,
+			smmute->nr_pairs * SMMUTE_FRAMES_PER_PAGE);
 	entries = devm_kmalloc(&pdev->dev, sizeof(struct msix_entry) * nr_msis,
 			       GFP_KERNEL);
 
@@ -2296,13 +2183,52 @@ static int smmute_pci_msi_enable(struct pci_dev *pdev)
 	return 0;
 }
 
+static int smmute_init_msi_pool(struct smmute_device *smmute)
+{
+	int vec, ret, i;
+	struct smmute_msi_pool *pool;
+	int nr_pools = smmute->nr_msix_entries;
+
+	smmute->msi_pools = devm_kcalloc(smmute->dev, nr_pools, sizeof(*pool),
+					 GFP_KERNEL);
+	if (!smmute->msi_pools)
+		return -ENOMEM;
+
+	for (i = 0; i < nr_pools; i++) {
+		pool = &smmute->msi_pools[i];
+		spin_lock_init(&pool->lock);
+		INIT_LIST_HEAD(&pool->transactions);
+
+		vec = smmute_get_msi_vector(smmute, i);
+		ret = request_irq(vec, smmute_msi_handler, 0,
+				  dev_name(smmute->dev), pool);
+		if (ret)
+			break;
+	}
+
+	return ret;
+}
+
+static void smmute_free_msi_pool(struct smmute_device *smmute)
+{
+	int i;
+
+	/*
+	 * Other resources are managed (freed automatically), but we don't use
+	 * devm for MSIs, because they have to be unregistered before MSIs are
+	 * freed by pci_disable_msix.
+	 */
+	for (i = 0; i < smmute->nr_msix_entries; i++)
+		free_irq(smmute_get_msi_vector(smmute, i),
+			 &smmute->msi_pools[i]);
+}
+
 static int smmute_common_probe(struct smmute_device *smmute)
 {
 	int minor;
 	size_t nr_frames;
 	int ret = -ENOMEM;
 	int cache_flags = 0;
-	unsigned long bitmap_size;
 	struct device *dev = smmute->dev;
 
 #ifdef DEBUG
@@ -2311,8 +2237,6 @@ static int smmute_common_probe(struct smmute_device *smmute)
 #endif
 
 	mutex_init(&smmute->resources_mutex);
-	spin_lock_init(&smmute->irq_map_lock);
-	smmute->irq_map = RB_ROOT;
 
 	nr_frames = smmute->nr_pairs * SMMUTE_FRAMES_PER_PAGE;
 	smmute->reserved_frames = devm_kzalloc(dev, BITS_TO_LONGS(nr_frames),
@@ -2380,15 +2304,9 @@ static int smmute_common_probe(struct smmute_device *smmute)
 		}
 	}
 
-	ret = -ENOMEM;
-	bitmap_size = BITS_TO_LONGS(smmute->nr_msix_entries) * sizeof(long);
-	smmute->requested_msis = devm_kzalloc(dev, bitmap_size, GFP_KERNEL);
-	if (!smmute->requested_msis)
+	ret = smmute_init_msi_pool(smmute);
+	if (ret)
 		goto err_release_tasks;
-
-	smmute->reserved_msis = devm_kzalloc(dev, bitmap_size, GFP_KERNEL);
-	if (!smmute->reserved_msis)
-		goto err_free_req_msis;
 
 	mutex_lock(&smmute_devices_mutex);
 	list_add(&smmute->list, &smmute_devices);
@@ -2401,8 +2319,6 @@ static int smmute_common_probe(struct smmute_device *smmute)
 
 	return 0;
 
-err_free_req_msis:
-	devm_kfree(dev, smmute->requested_msis);
 err_release_tasks:
 	kset_unregister(smmute->tasks);
 err_release_files:
@@ -2425,18 +2341,14 @@ err_free_frames:
 
 static void smmute_common_remove(struct smmute_device *smmute)
 {
-	size_t idx;
-
 	mutex_lock(&smmute_devices_mutex);
 	list_del(&smmute->list);
 	mutex_unlock(&smmute_devices_mutex);
 
-	for_each_set_bit(idx, smmute->requested_msis, smmute->nr_msix_entries)
-		devm_free_irq(smmute->dev, smmute_get_msi_vector(smmute, idx),
-			      smmute);
-
 	if (smmute->sva)
 		iommu_sva_device_shutdown(smmute->dev);
+
+	smmute_free_msi_pool(smmute);
 
 	kset_unregister(smmute->tasks);
 	kset_unregister(smmute->files);
@@ -2554,7 +2466,7 @@ static int smmute_plat_probe(struct platform_device *pdev)
 	struct smmute_device *smmute;
 	struct msi_desc *msi_desc;
 	struct resource *mem;
-	unsigned long nr_msis = 1024;
+	unsigned long nr_msis = SMMUTE_MAX_MSIS;
 	int ret = -ENOMEM;
 	int i = 0;
 
