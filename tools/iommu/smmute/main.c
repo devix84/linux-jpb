@@ -26,6 +26,13 @@ static void print_help(char *progname)
 "  -b <backend>     backend (driver): k[ernel], v[fio], i[pc]        kernel\n"
 "  -c               check buffer values                                    \n"
 "  -d               debug - print additional messages                      \n"
+"  -f <mode>        fault - inject a fault                                 \n"
+"                   <mode> tells where to inject the fault:                \n"
+"                    * read (invalid read access)                          \n"
+"                    * write (invalid write access)                        \n"
+"                    * drv (let kernel driver generate a translation fault)\n"
+"                    * tlb (buffer is unreachable after unmap)             \n"
+"                    * pasid (buffer is unreachable after unbind)          \n"
 "  -g <n>           seed for mmap hints and init values                   0\n"
 "  -m m/r/s/p       mode: memcpy, rand48, sum64 or p2p                    m\n"
 "  -n <n>           number of transactions                                1\n"
@@ -48,7 +55,7 @@ static void print_help(char *progname)
 	progname, progname, progname);
 }
 
-static const char *optstring = "b:cdg:m:n:o:qr:s:t:u:h";
+static const char *optstring = "b:cdf:g:m:n:o:qr:s:t:u:h";
 
 enum loglevel loglevel = LOG_INFO;
 
@@ -58,6 +65,12 @@ enum transaction_type {
 	SUM64,
 	P2P,
 };
+
+#define INJECT_FAULT_READ		(1 << 0)
+#define INJECT_FAULT_WRITE		(1 << 1)
+#define INJECT_FAULT_TLB		(1 << 2)
+#define INJECT_FAULT_PASID		(1 << 3)
+#define INJECT_FAULT_DRIVER		(1 << 4)
 
 struct program_options {
 	enum smmute_backend		backend;
@@ -72,6 +85,9 @@ struct program_options {
 	unsigned int			sleep_time;
 
 	bool				check_buffers;
+
+	/* INJECT_FAULT_* */
+	unsigned int			fault;
 
 	struct smmute_mem_options	mem;
 };
@@ -469,18 +485,26 @@ static int perform_one_transaction(struct smmute_dev *dev,
 __attribute__((always_inline))
 static inline int smmute_create_buffer(struct smmute_dev *dev, void **va, 
 				dma_addr_t *iova, size_t size, int prot,
-				struct smmute_mem_options *opts)
+				struct program_options *opts)
 {
 	int ret;
+	struct smmute_mem_options *mopts = &opts->mem;
+	void *addr = smmute_alloc_buffer(dev, size, prot, mopts);
 
-	/* FIXME: force inline for alloca */
-	void *addr = smmute_alloc_buffer(dev, size, prot, opts);
 	if (!addr)
 		return ENOMEM;
 
-	ret = smmute_dma_map_buffer(dev, addr, iova, size, prot, opts);
+	if (((opts->fault & INJECT_FAULT_READ) && (prot & PROT_READ)) ||
+	    ((opts->fault & INJECT_FAULT_WRITE) && (prot & PROT_WRITE))) {
+		*va = addr;
+		*iova = 0;
+		pr_debug("injecting fault at va=%p\n", *va);
+		return 0;
+	}
+
+	ret = smmute_dma_map_buffer(dev, addr, iova, size, prot, mopts);
 	if (ret) {
-		smmute_free_buffer(dev, addr, size, opts);
+		smmute_free_buffer(dev, addr, size, mopts);
 		return ret;
 	}
 
@@ -493,15 +517,15 @@ static inline int smmute_create_buffer(struct smmute_dev *dev, void **va,
 
 static void smmute_destroy_buffer(struct smmute_dev *dev, void *va,
 				  dma_addr_t iova, size_t size,
-				  struct smmute_mem_options *opts)
+				  struct program_options *opts)
 {
 	if (!va)
 		return;
 
-	if (smmute_dma_unmap_buffer(dev, va, iova, size, opts))
+	if (iova && smmute_dma_unmap_buffer(dev, va, iova, size, &opts->mem))
 		pr_err("unable to unmap %p->%#llx (%zu) buffer!\n", va, iova, size);
 
-	smmute_free_buffer(dev, va, size, opts);
+	smmute_free_buffer(dev, va, size, &opts->mem);
 
 	pr_debug("destroyed buffer va=%p, iova=%#llx, size=%zu\n", va, iova, size);
 }
@@ -512,6 +536,7 @@ static int do_transaction(struct smmute_dev *dev, struct program_options *opts)
 	int ret = 0;
 	void *in_buf_va = NULL;
 	void *out_buf_va = NULL;
+	bool do_unbind = !!opts->mem.unified;
 	dma_addr_t in_buf_iova, out_buf_iova;
 	/*
 	 * In the future, we might want to separate input and output offsets. At
@@ -544,14 +569,14 @@ static int do_transaction(struct smmute_dev *dev, struct program_options *opts)
 
 	if (type == MEMCPY || type == SUM64 || type == P2P) {
 		ret = smmute_create_buffer(dev, &in_buf_va, &in_buf_iova,
-					   in_size, PROT_READ, &opts->mem);
+					   in_size, PROT_READ, opts);
 		if (ret)
 			return ret;
 	}
 
 	if (type == MEMCPY || type == RAND48 || type == P2P) {
 		ret = smmute_create_buffer(dev, &out_buf_va, &out_buf_iova,
-					   out_size, PROT_WRITE, &opts->mem);
+					   out_size, PROT_WRITE, opts);
 		if (ret)
 			goto out_unmap;
 	}
@@ -569,6 +594,8 @@ static int do_transaction(struct smmute_dev *dev, struct program_options *opts)
 
 	if (opts->mem.unified)
 		params.common.flags |= SMMUTE_FLAG_SVA;
+	if (opts->fault & INJECT_FAULT_DRIVER)
+		params.common.flags |= SMMUTE_FLAG_FAULT;
 
 	if (type == MEMCPY) {
 		params.memcpy.output_start = (__u64)out_buf_iova + out_offset;
@@ -616,11 +643,51 @@ static int do_transaction(struct smmute_dev *dev, struct program_options *opts)
 			sleep(opts->sleep_time);
 	}
 
-out_unmap:
-	smmute_destroy_buffer(dev, out_buf_va, out_buf_iova, out_size, &opts->mem);
-	smmute_destroy_buffer(dev, in_buf_va, in_buf_iova, in_size, &opts->mem);
+	/* TLB fault injection: retry access after unmap/unbind */
+	if (!ret && opts->fault & INJECT_FAULT_TLB) {
+		if (out_buf_va) {
+			smmute_destroy_buffer(dev, out_buf_va, out_buf_iova,
+					      out_size, opts);
+			out_buf_va = NULL;
+		} else {
+			smmute_destroy_buffer(dev, in_buf_va, in_buf_iova,
+					      in_size, opts);
+			in_buf_va = NULL;
+		}
 
-	if (opts->mem.unified) {
+		ret = perform_one_transaction(dev, opts, &params);
+		if (!ret)
+			pr_info("Critical: access succeeded after unmap!\n");
+	} else if (!ret && opts->fault & INJECT_FAULT_PASID && opts->mem.unified) {
+		do_unbind = false;
+		ret = smmute_unbind(dev);
+		if (ret) {
+			pr_err("cannot unbind task: %s\n", strerror(ret));
+			goto out_unmap;
+		}
+
+		ret = perform_one_transaction(dev, opts, &params);
+		if (!ret)
+			/*
+			 * This is expected with the kernel driver, since it
+			 * automatically rebinds when performing the transaction
+			 */
+			pr_info("Critical: access succeeded after unbind!\n");
+	}
+
+	if (opts->fault) {
+		/*
+		 * Invert fault status: a return value of 0 means that we
+		 * successfully triggered an error :)
+		 */
+		ret = ret ? 0 : EFAULT;
+	}
+
+out_unmap:
+	smmute_destroy_buffer(dev, out_buf_va, out_buf_iova, out_size, opts);
+	smmute_destroy_buffer(dev, in_buf_va, in_buf_iova, in_size, opts);
+
+	if (do_unbind) {
 		int ret2 = smmute_unbind(dev);
 		if (ret2) {
 			pr_err("cannot unbind task: %s\n", strerror(ret2));
@@ -644,6 +711,29 @@ out_unmap:
 
 #define parse_ul(optarg, dest) _parse_long(optarg, dest, strtoul)
 #define parse_sl(optarg, dest) _parse_long(optarg, dest, strtol)
+
+static int parse_fault_option(struct program_options *opts)
+{
+	if (!optarg || opts->fault)
+		return 1;
+
+	if (!strncmp(optarg, "read", 4)) {
+		opts->fault |= INJECT_FAULT_READ;
+	} else if (!strncmp(optarg, "write", 5)) {
+		opts->fault |= INJECT_FAULT_WRITE;
+	} else if (!strncmp(optarg, "tlb", 3)) {
+		opts->fault |= INJECT_FAULT_TLB;
+	} else if (!strncmp(optarg, "drv", 3)) {
+		opts->fault |= INJECT_FAULT_DRIVER;
+	} else if (!strncmp(optarg, "pasid", 5)) {
+		opts->fault |= INJECT_FAULT_PASID;
+	} else {
+		pr_err("Unknown mode '%s'\n", optarg);
+		return 1;
+	}
+
+	return 0;
+}
 
 static int parse_unified_option(struct smmute_mem_options *opts)
 {
@@ -764,6 +854,10 @@ static int parse_options(int argc, char *argv[], struct program_options *opts)
 			break;
 		case 'd':
 			loglevel = LOG_DEBUG;
+			break;
+		case 'f':
+			if (parse_fault_option(opts))
+				return 1;
 			break;
 		case 'g':
 			if (parse_ul(optarg, &opts->seed))
