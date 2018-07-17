@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -34,6 +35,10 @@ static void print_help(char *progname)
 "                    * tlb (buffer is unreachable after unmap)             \n"
 "                    * pasid (buffer is unreachable after unbind)          \n"
 "  -g <n>           seed for mmap hints and init values                   0\n"
+"  -k <when>        Simulate a bug by killing self.                        \n"
+"                   <when> tells at which point to die                     \n"
+"                   * bind: after binding, trigger exit_mm                 \n"
+"                   * tsac: after launching the transaction, die           \n"
 "  -m m/r/s/p       mode: memcpy, rand48, sum64 or p2p                    m\n"
 "  -n <n>           number of transactions                                1\n"
 "  -o <n>           offset into input and output DMA regions              0\n"
@@ -55,7 +60,7 @@ static void print_help(char *progname)
 	progname, progname, progname);
 }
 
-static const char *optstring = "b:cdf:g:m:n:o:qr:s:t:u:h";
+static const char *optstring = "b:cdf:g:k:m:n:o:qr:s:t:u:h";
 
 enum loglevel loglevel = LOG_INFO;
 
@@ -71,6 +76,9 @@ enum transaction_type {
 #define INJECT_FAULT_TLB		(1 << 2)
 #define INJECT_FAULT_PASID		(1 << 3)
 #define INJECT_FAULT_DRIVER		(1 << 4)
+
+#define KILL_BIND			1
+#define KILL_TSAC			2
 
 struct program_options {
 	enum smmute_backend		backend;
@@ -88,6 +96,7 @@ struct program_options {
 
 	/* INJECT_FAULT_* */
 	unsigned int			fault;
+	unsigned int			kill;
 
 	struct smmute_mem_options	mem;
 };
@@ -416,6 +425,11 @@ static int perform_one_transaction(struct smmute_dev *dev,
 	result.blocking = true;
 	result.keep = false;
 
+	if (opts->kill == KILL_TSAC && kill(0, SIGINT)) {
+		perror("kill()");
+		return 1;
+	}
+
 	ret = smmute_get_result(dev, &result);
 	if (ret) {
 		pr_err("could not get result: %s\n", strerror(ret));
@@ -564,6 +578,11 @@ static int do_transaction(struct smmute_dev *dev, struct program_options *opts)
 		if (ret) {
 			pr_err("cannot bind task: %s\n", strerror(ret));
 			return ret;
+		}
+
+		if (opts->kill == KILL_BIND && kill(0, SIGINT)) {
+			perror("kill()");
+			return 1;
 		}
 	}
 
@@ -735,6 +754,23 @@ static int parse_fault_option(struct program_options *opts)
 	return 0;
 }
 
+static int parse_kill_option(struct program_options *opts)
+{
+	if (!optarg || opts->fault)
+		return 1;
+
+	if (!strcmp(optarg, "bind")) {
+		opts->kill = KILL_BIND;
+	} else if (!strcmp(optarg, "tsac")) {
+		opts->kill = KILL_TSAC;
+	} else {
+		pr_err("unknown mode '%s'\n", optarg);
+		return 1;
+	}
+
+	return 0;
+}
+
 static int parse_unified_option(struct smmute_mem_options *opts)
 {
 	int flag_len;
@@ -861,6 +897,10 @@ static int parse_options(int argc, char *argv[], struct program_options *opts)
 			break;
 		case 'g':
 			if (parse_ul(optarg, &opts->seed))
+				return 1;
+			break;
+		case 'k':
+			if (parse_kill_option(opts))
 				return 1;
 			break;
 		case 'm':
