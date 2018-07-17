@@ -205,6 +205,8 @@ static int madvise_buffer(void *buf, off_t offset,
 		/* we don't want to thrash an initialised anonymous mapping */
 		if (output || opts->mem.in_file != -1)
 			madvise_flags |= MADV_DONTNEED;
+	} else if (unified & UNIFIED_MEM_ADV_HUGE) {
+		madvise_flags |= MADV_HUGEPAGE;
 	}
 
 	if (madvise_flags && madvise(buf, offset + opts->size, madvise_flags))
@@ -810,6 +812,8 @@ static int parse_unified_option(struct smmute_mem_options *opts)
 			opts->unified |= UNIFIED_MEM_ADV_DNEED;
 		} else if (flag_equals("madv_willneed")) {
 			opts->unified |= UNIFIED_MEM_ADV_WNEED;
+		} else if (flag_equals("madv_huge")) {
+			opts->unified |= UNIFIED_MEM_ADV_HUGE;
 		} else if (flag_equals("hugetlb")) {
 			opts->unified |= UNIFIED_MEM_HUGE;
 		} else if (flag_equals("in_file=")) {
