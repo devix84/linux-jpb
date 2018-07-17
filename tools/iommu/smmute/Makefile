@@ -23,6 +23,7 @@ TEST_VFIO	:= $(OUTPUT)test-vfio
 TEST_FAULT	:= $(OUTPUT)smmute-fault
 TEST_REPLAY	:= $(OUTPUT)test-vfio-replay
 SERVER		:= $(OUTPUT)smmuted
+TEST_BIND	:= $(OUTPUT)smmute-bind
 DRIVERS		:= driver-kernel.o driver-vfio.o driver-ipc.o
 
 ALL		+= $(SMMUTE)
@@ -32,6 +33,7 @@ ALL		+= $(SERVER)
 ALL		+= $(TEST_VFIO)
 ALL		+= $(TEST_FAULT)
 ALL		+= $(TEST_REPLAY)
+ALL		+= $(TEST_BIND)
 
 all: $(ALL)
 
@@ -57,6 +59,9 @@ $(TEST_FAULT): $(addprefix $(OUTPUT),smmute-fault.o lib.o $(DRIVERS))
 	$(CC) -o $@ $^ $(LIB_LDFLAGS)
 
 $(TEST_REPLAY): $(addprefix $(OUTPUT),vfio-replay.o lib.o $(DRIVERS))
+	$(CC) -o $@ $^ $(LIB_LDFLAGS)
+
+$(TEST_BIND): $(addprefix $(OUTPUT),smmute-bind.o lib.o $(DRIVERS))
 	$(CC) -o $@ $^ $(LIB_LDFLAGS)
 
 clean:
