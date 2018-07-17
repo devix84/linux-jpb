@@ -36,9 +36,11 @@ static int smmute_kernel_get_result(struct smmute_dev *dev,
 static int smmute_kernel_bind(struct smmute_dev *dev)
 {
 	struct smmute_kdev *kdev = to_kdev(dev);
+	struct smmute_bind_param param = {
+		.pid = -1,
+	};
 
-	/* PASID handling isn't visible to the application, ignore arguments */
-	if (ioctl(kdev->fd, SMMUTE_IOCTL_BIND_TASK))
+	if (ioctl(kdev->fd, SMMUTE_IOCTL_BIND_TASK, &param))
 		return errno;
 
 	return 0;
@@ -47,8 +49,11 @@ static int smmute_kernel_bind(struct smmute_dev *dev)
 static int smmute_kernel_unbind(struct smmute_dev *dev)
 {
 	struct smmute_kdev *kdev = to_kdev(dev);
+	struct smmute_bind_param param = {
+		.pid = -1,
+	};
 
-	if (ioctl(kdev->fd, SMMUTE_IOCTL_UNBIND_TASK))
+	if (ioctl(kdev->fd, SMMUTE_IOCTL_UNBIND_TASK, &param))
 		return errno;
 
 	return 0;
