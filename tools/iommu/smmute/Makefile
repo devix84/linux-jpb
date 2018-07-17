@@ -18,11 +18,13 @@ LIB_LDFLAGS	+= -pthread -lrt
 
 SMMUTE		:= $(OUTPUT)smmute
 SPLICE		:= $(OUTPUT)smmute-splice
+MULTI		:= $(OUTPUT)smmute-multi
 SERVER		:= $(OUTPUT)smmuted
 DRIVERS		:= driver-kernel.o driver-vfio.o driver-ipc.o
 
 ALL		+= $(SMMUTE)
 ALL		+= $(SPLICE)
+ALL		+= $(MULTI)
 ALL		+= $(SERVER)
 
 all: $(ALL)
@@ -37,6 +39,9 @@ $(SPLICE): $(addprefix $(OUTPUT),splice.o)
 	$(CC) -o $@ $^
 
 $(SERVER): $(addprefix $(OUTPUT),ipc-server.o lib.o $(DRIVERS))
+	$(CC) -o $@ $^ $(LIB_LDFLAGS)
+
+$(MULTI): $(addprefix $(OUTPUT),multi.o lib.o $(DRIVERS))
 	$(CC) -o $@ $^ $(LIB_LDFLAGS)
 
 clean:
