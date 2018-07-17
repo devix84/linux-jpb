@@ -9,6 +9,10 @@
 
 #define PAGE_SIZE		sysconf(_SC_PAGE_SIZE)
 
+#define ALIGN(x, a)		__ALIGN_MASK(x,(typeof(x))(a)-1)
+#define __ALIGN_MASK(x, mask)	(((x)+(mask))&~(mask))
+#define PAGE_ALIGN(x)		ALIGN(x, PAGE_SIZE)
+
 #ifndef dma_addr_t
 #define dma_addr_t		unsigned long long
 #endif
@@ -105,6 +109,9 @@ enum smmute_backend {
 struct smmute_backend_options {
 	int				flags;
 };
+
+/* Put multiple devices in the same container when possible */
+#define SMMUTE_BACKEND_VFIO_FLAG_MERGE			(1 << 0)
 
 struct smmute_dev;
 
