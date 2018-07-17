@@ -188,6 +188,7 @@ struct smmute_device {
 #define SMMUTE_DMA_EMPTY	0
 #define SMMUTE_DMA_KERNEL	1
 #define SMMUTE_DMA_USER		2
+#define SMMUTE_DMA_MSI		4
 
 /*
  * struct smmute_dma - Keep track of all the memory and mappings flying around
@@ -229,6 +230,9 @@ struct smmute_task {
 	struct smmute_file_desc		*fd;
 	struct list_head		fd_head;
 	struct kobject			kobj;
+
+	struct list_head		msi_mappings;
+	spinlock_t			msi_mappings_lock;
 };
 
 enum smmute_transaction_state {
