@@ -20,7 +20,7 @@
 #include <linux/types.h>
 
 #define SMMUTE_VERSION_MAJOR	0x0
-#define SMMUTE_VERSION_MINOR	0x21
+#define SMMUTE_VERSION_MINOR	0x22
 
 /*
  * We have 8 bits of ioctl numbers. Let's allocate ioctls 1-31 for transaction
@@ -228,6 +228,13 @@ struct smmute_transaction_result
 	__u32 status;
 
 	__u8 pad1[20];
+};
+
+struct smmute_bind_param
+{
+	__s32 pid;
+	__s32 pasid;
+	__u8 pad[16];
 };
 
 /**

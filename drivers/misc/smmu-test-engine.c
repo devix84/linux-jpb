@@ -25,6 +25,7 @@
 #include <linux/platform_device.h>
 #include <linux/poll.h>
 #include <linux/printk.h>
+#include <linux/ptrace.h>
 #include <linux/rbtree.h>
 #include <linux/sched/mm.h>
 #include <linux/splice.h>
@@ -356,6 +357,14 @@ static int smmute_mm_exit_handler(struct device *dev, int pasid, void *data)
 {
 	/* data is smmu_task passed to bind. */
 	dev_dbg(dev, "PASID %d exit\n", pasid);
+
+	if (!data) {
+		/*
+		 * Explicit bind (see smmute_bind_task), so help validation by
+		 * stalling here.
+		 */
+		msleep(1000);
+	}
 
 	return 0;
 }
@@ -1585,6 +1594,74 @@ static long smmute_check_version(struct smmute_file_desc *fd, void __user *argp)
 	return 0;
 }
 
+static long smmute_bind_task(struct smmute_file_desc *fd, void *argp, bool bind)
+{
+	int ret;
+	struct mm_struct *mm;
+	struct task_struct *task;
+	struct smmute_bind_param param;
+	struct smmute_device *smmute = fd->smmute;
+
+	ret = copy_from_user(&param, argp, sizeof(param));
+	if (ret)
+		return -EFAULT;
+
+	if (param.pid <= 0) {
+		task = current;
+		/* Balance refs */
+		get_task_struct(task);
+	} else {
+		task = find_get_task_by_vpid(param.pid);
+		if (bind && !task)
+			return -ESRCH;
+	}
+
+	if (task == current) {
+		if (bind)
+			ret = smmute_task_get(fd, NULL);
+		else
+			smmute_task_put(fd, NULL);
+	} else {
+		/* Bind foreign task, for testing. */
+		if (bind) {
+			pr_warn_once("binding foreign task\n");
+			mm = mm_access(task, PTRACE_MODE_ATTACH_REALCREDS);
+			if (!mm) {
+				ret = -ESRCH;
+				goto out_put_task;
+			}
+			ret = iommu_sva_bind_device(smmute->dev, mm,
+						    &param.pasid,
+						    IOMMU_SVA_FEAT_IOPF, NULL);
+
+			mmput(mm);
+		} else {
+			pr_warn_once("unbinding foreign task\n");
+
+			/*
+			 * We kinda break the API here - shouldn't unbind if
+			 * task exited, if we can't obtain task or mm. But I
+			 * want to push it a bit to check that nothing breaks,
+			 * if someone ignores this requirement (and if the pasid
+			 * hasn't been reallocated).
+			 */
+			ret = iommu_sva_unbind_device(smmute->dev, param.pasid);
+		}
+
+		if (ret)
+			goto out_put_task;
+
+		ret = copy_to_user(argp, &param, sizeof(param));
+		ret = ret ? -EFAULT : 0;
+	}
+
+out_put_task:
+	if (task)
+		put_task_struct(task);
+
+	return ret;
+}
+
 static long smmute_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void *argp = (void __user *)arg;
@@ -1596,10 +1673,9 @@ static long smmute_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	case SMMUTE_IOCTL_GET_RESULT:
 		return smmute_result_ioctl(fd, argp);
 	case SMMUTE_IOCTL_BIND_TASK:
-		return smmute_task_get(fd, NULL);
+		return smmute_bind_task(fd, argp, true);
 	case SMMUTE_IOCTL_UNBIND_TASK:
-		smmute_task_put(fd, NULL);
-		return 0;
+		return smmute_bind_task(fd, argp, false);
 	default:
 		return smmute_transaction_ioctl(fd, cmd, argp);
 	}
