@@ -145,6 +145,9 @@ static void *smmute_ipc_alloc_buffer(struct smmute_dev *dev, size_t size,
 	struct smmute_ipc_dev *idev = to_ipc_dev(dev);
 	struct smmute_ipc_shm *shm = &idev->shr->shm;
 
+	if (opts->unified)
+		return smmute_lib_alloc_buffer(-1, size, prot, opts);
+
 	buf = malloc(sizeof(*buf));
 	if (!buf)
 		return NULL;
@@ -195,6 +198,11 @@ static void smmute_ipc_free_buffer(struct smmute_dev *dev, void *va, size_t size
 	struct smmute_ipc_dev *idev = to_ipc_dev(dev);
 	struct smmute_ipc_dma_buf *tmp, *buf = NULL;
 
+	if (opts->unified) {
+		smmute_lib_free_buffer(va, size, opts);
+		return;
+	}
+
 	size = PAGE_ALIGN(size);
 
 	pthread_mutex_lock(&idev->bufs.lock);
@@ -239,6 +247,11 @@ static int smmute_ipc_map_buffer(struct smmute_dev *dev, void *va,
 		.hdr.size	= sizeof(resp),
 	};
 
+	if (opts->unified) {
+		*iova = (uint64_t)va;
+		return 0;
+	}
+
 	pthread_mutex_lock(&idev->bufs.lock);
 	list_for_each_entry(tmp, &idev->bufs.list, list) {
 		if (tmp->va == va) {
@@ -282,7 +295,48 @@ static int smmute_ipc_unmap_buffer(struct smmute_dev *dev, void *va,
 		.hdr.size	= sizeof(resp),
 	};
 
+	if (opts->unified)
+		return 0;
+
 	return smmute_ipc_transmit(idev, &unmap, &resp);
+}
+
+static int smmute_ipc_bind(struct smmute_dev *dev, pid_t pid, int *pasid)
+{
+	int ret;
+	struct smmute_ipc_dev *idev = to_ipc_dev(dev);
+	struct smmute_ipc_bind_task bind = {
+		.hdr.size	= sizeof(bind),
+		.hdr.command	= SMMUTE_IPC_BIND_TASK,
+		.pid		= pid,
+	};
+	struct smmute_ipc_bind_resp resp = {
+		.hdr.size	= sizeof(resp),
+		.pasid		= 0,
+	};
+
+	ret = smmute_ipc_transmit(idev, &bind, &resp);
+	if (ret)
+		return ret;
+
+	*pasid = resp.pasid;
+	return 0;
+}
+
+static int smmute_ipc_unbind(struct smmute_dev *dev, pid_t pid, int pasid)
+{
+	struct smmute_ipc_dev *idev = to_ipc_dev(dev);
+	struct smmute_ipc_unbind_task unbind = {
+		.hdr.size	= sizeof(unbind),
+		.hdr.command	= SMMUTE_IPC_UNBIND_TASK,
+		.pid		= pid,
+		.pasid		= pasid,
+	};
+	struct smmute_ipc_unbind_resp resp = {
+		.hdr.size	= sizeof(resp),
+	};
+
+	return smmute_ipc_transmit(idev, &unbind, &resp);
 }
 
 static int smmute_ipc_open(struct smmute_dev *dev, const char *path, int flags)
@@ -433,8 +487,8 @@ struct smmute_device_ops ipc_ops = {
 	.open			= smmute_ipc_open,
 	.close			= smmute_ipc_close,
 
-//	.bind			= smmute_ipc_bind,
-//	.unbind			= smmute_ipc_unbind,
+	.bind			= smmute_ipc_bind,
+	.unbind			= smmute_ipc_unbind,
 
 	.alloc_buffer		= smmute_ipc_alloc_buffer,
 	.free_buffer		= smmute_ipc_free_buffer,

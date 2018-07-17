@@ -100,6 +100,59 @@ static int smmute_vfio_map_buffer(struct smmute_dev *dev, void *va,
 	return ret;
 }
 
+struct smmute_vfio_bind {
+	struct vfio_iommu_type1_bind		head;
+	struct vfio_iommu_type1_bind_process	body;
+};
+
+static int smmute_vfio_bind(struct smmute_dev *dev, pid_t pid, int *pasid)
+{
+	int ret;
+	bool current = pid <= 0 || getpid() == pid;
+	struct smmute_vdev *vdev = to_vdev(dev);
+	struct smmute_vfio_bind svm = {
+		.head.argsz	= sizeof(svm),
+		.head.flags	= VFIO_IOMMU_BIND_PROCESS,
+		.body.flags	= current ? 0 : VFIO_IOMMU_BIND_PID,
+		.body.pid	= current ? -1 : pid,
+	};
+
+	/*
+	 * Could optimize this by only sending bind once per container, but the
+	 * IOMMU and VFIO drivers already keep track of things.
+	 */
+	ret = ioctl(vdev->group->container->fd, VFIO_IOMMU_BIND, &svm);
+	if (ret) {
+		perror("VFIO_IOMMU_BIND");
+		return errno;
+	}
+
+	*pasid = svm.body.pasid;
+
+	return ret;
+}
+
+static int smmute_vfio_unbind(struct smmute_dev *dev, pid_t pid, int pasid)
+{
+	int ret;
+	bool current = pid <= 0 || getpid() == pid;
+	struct smmute_vdev *vdev = to_vdev(dev);
+	struct smmute_vfio_bind svm = {
+		.head.argsz	= sizeof(svm),
+		.head.flags	= VFIO_IOMMU_BIND_PROCESS,
+		.body.flags	= current ? 0 : VFIO_IOMMU_BIND_PID,
+		.body.pid	= current ? -1 : pid,
+	};
+
+	ret = ioctl(vdev->group->container->fd, VFIO_IOMMU_UNBIND, &svm);
+	if (ret) {
+		perror("VFIO_IOMMU_UNBIND");
+		return errno;
+	}
+
+	return ret;
+}
+
 static int smmute_vfio_unmap_buffer(struct smmute_dev *dev, void *va,
 				    dma_addr_t iova, size_t size,
 				    struct smmute_mem_options *opts)
@@ -226,7 +279,8 @@ static int smmute_vfio_launch_transaction(struct smmute_dev *dev, int cmd,
 	pr_debug("Launching transaction %llu on frame %u\n", transaction->id,
 		 frame_nr);
 
-	pframe->substreamid	= SUBSTREAMID_INVALID;
+	pframe->substreamid	= (params->common.flags & SMMUTE_FLAG_SVA ?
+				   params->common.pasid : SUBSTREAMID_INVALID);
 	pframe->pctrl		= SMMUTE_PCTRL_SSD_NS;
 
 	uframe->cmd		= ENGINE_HALTED;
@@ -795,8 +849,8 @@ struct smmute_device_ops vfio_ops = {
 	.open			= smmute_vfio_open,
 	.close			= smmute_vfio_close,
 
-	//.bind			= smmute_vfio_bind,
-	//.unbind		= smmute_vfio_unbind,
+	.bind			= smmute_vfio_bind,
+	.unbind			= smmute_vfio_unbind,
 
 	.alloc_buffer		= smmute_vfio_alloc_buffer,
 	.free_buffer		= smmute_vfio_free_buffer,

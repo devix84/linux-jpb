@@ -5,8 +5,8 @@
 
 #define VFIO_PATH_MAX	PATH_MAX
 
-//#define SMMUTE_IOMMU_TYPE	VFIO_TYPE1v2_IOMMU
-#define SMMUTE_IOMMU_TYPE	VFIO_TYPE1_NESTING_IOMMU
+#define SMMUTE_IOMMU_TYPE	VFIO_TYPE1v2_IOMMU
+//#define SMMUTE_IOMMU_TYPE	VFIO_TYPE1_NESTING_IOMMU
 
 /*
  * All the low-level frame handling is copied directly from smmu-test-engine.h.

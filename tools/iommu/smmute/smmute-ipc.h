@@ -16,8 +16,8 @@ enum smmute_ipc_command {
 	SMMUTE_IPC_LAUNCH_TRANSACTION	= 3,
 	SMMUTE_IPC_GET_RESULT		= 4,
 
-//	SMMUTE_IPC_BIND,
-//	SMMUTE_IPC_UNBIND,
+	SMMUTE_IPC_BIND_TASK		= 5,
+	SMMUTE_IPC_UNBIND_TASK		= 6,
 
 	SMMUTE_IPC_NR_COMMANDS,
 };
@@ -91,6 +91,32 @@ struct smmute_ipc_launch_resp {
 	uint64_t			transaction_id;
 };
 
+/* Client asks to bind its task */
+__packed__
+struct smmute_ipc_bind_task {
+	struct smmute_ipc_msg_hdr	hdr;
+	int32_t				pid;
+};
+
+/* Server returns a PASID when successful */
+__packed__
+struct smmute_ipc_bind_resp {
+	struct smmute_ipc_resp_hdr	hdr;
+	uint64_t			pasid;
+};
+
+__packed__
+struct smmute_ipc_unbind_task {
+	struct smmute_ipc_msg_hdr	hdr;
+	int32_t				pid;
+	uint64_t			pasid;
+};
+
+__packed__
+struct smmute_ipc_unbind_resp {
+	struct smmute_ipc_resp_hdr	hdr;
+};
+
 /* Client asks for updates on a transaction */
 __packed__
 struct smmute_ipc_result {
@@ -123,6 +149,8 @@ union smmute_ipc_msg {
 	struct smmute_ipc_map		map;
 	struct smmute_ipc_unmap		unmap;
 	struct smmute_ipc_launch	launch;
+	struct smmute_ipc_bind_task	bind_task;
+	struct smmute_ipc_unbind_task	unbind_task;
 	struct smmute_ipc_result	result;
 };
 
@@ -131,6 +159,8 @@ union smmute_ipc_resp {
 	struct smmute_ipc_resp_err	err;
 	struct smmute_ipc_map_resp	map;
 	struct smmute_ipc_unmap_resp	unmap;
+	struct smmute_ipc_bind_resp	bind;
+	struct smmute_ipc_unbind_resp	unbind;
 	struct smmute_ipc_launch_resp	launch;
 	struct smmute_ipc_result_resp	result;
 };
@@ -148,6 +178,10 @@ static inline const char *smmute_ipc_command_str(enum smmute_ipc_command cmd)
 		return "launch";
 	case SMMUTE_IPC_GET_RESULT:
 		return "get_result";
+	case SMMUTE_IPC_BIND_TASK:
+		return "bind_task";
+	case SMMUTE_IPC_UNBIND_TASK:
+		return "unbind_task";
 	default:
 		return "unknown";
 	}

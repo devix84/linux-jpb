@@ -109,6 +109,7 @@ static int smmute_server_map(struct server *serv, int sock,
 		goto out_close_fd;
 	}
 
+	/* If the address space is unified, backend should return the iova */
 	ret = smmute_dma_map_buffer(&serv->dev, buf->va, &buf->iova, map->size,
 				    map->prot, &serv->opts->mem);
 	if (ret) {
@@ -182,12 +183,43 @@ static int smmute_server_launch(struct server *serv, int sock,
 	int ret;
 	resp->hdr.size = sizeof(*resp);
 
+	/* Use unified address space if possible */
+	if (launch->params.common.flags & SMMUTE_FLAG_SVA &&
+	    serv->opts->mem.unified) {
+		launch->params.common.flags |= SMMUTE_FLAG_SVA;
+		launch->params.common.pasid = serv->opts->mem.pasid;
+	}
+
 	/* Clients are trusted. Let the driver do the sanity checking. */
 	ret = smmute_launch_transaction(&serv->dev, launch->cmd, &launch->params);
 	if (!ret)
 		resp->transaction_id = launch->params.common.transaction_id;
 
 	return ret;
+}
+
+static int smmute_server_bind_task(struct server *serv, int sock,
+				   struct smmute_ipc_bind_task *bind,
+				   struct smmute_ipc_bind_resp *resp)
+{
+	int ret;
+	int pasid;
+	resp->hdr.size = sizeof(*resp);
+
+	ret = smmute_bind(&serv->dev, bind->pid, &pasid);
+	if (ret)
+		return ret;
+
+	resp->pasid = pasid;
+	return 0;
+}
+
+static int smmute_server_unbind_task(struct server *serv, int sock,
+				     struct smmute_ipc_unbind_task *unbind,
+				     struct smmute_ipc_unbind_resp *resp)
+{
+	resp->hdr.size = sizeof(*resp);
+	return smmute_unbind(&serv->dev, unbind->pid, unbind->pasid);
 }
 
 static int smmute_server_result(struct server *serv, int sock,
@@ -301,6 +333,24 @@ static int smmute_server_handle(struct server *serv, int sock)
 	case SMMUTE_IPC_GET_RESULT:
 		ret = smmute_server_result(serv, sock, &msg.result,
 					   &resp.result);
+		break;
+
+	case SMMUTE_IPC_BIND_TASK:
+		if (msg.bind_task.pid != pid)
+			ret = EACCES;
+		else
+			ret = smmute_server_bind_task(serv, sock,
+						      &msg.bind_task,
+						      &resp.bind);
+		break;
+
+	case SMMUTE_IPC_UNBIND_TASK:
+		if (msg.unbind_task.pid != pid)
+			ret = EACCES;
+		else
+			ret = smmute_server_unbind_task(serv, sock,
+							&msg.unbind_task,
+							&resp.unbind);
 		break;
 
 	case SMMUTE_IPC_INVALID:
@@ -493,17 +543,32 @@ int smmute_server_create(struct server *serv)
 		return ret;
 	}
 
-	ret = smmute_connection_create(serv);
-	if (ret) {
-		smmute_device_close(&serv->dev);
-		return ret;
+	if (serv->opts->mem.unified) {
+		ret = smmute_bind(&serv->dev, getpid(), &serv->opts->mem.pasid);
+		if (ret) {
+			pr_err("cannot bind to device\n");
+			goto err_close;
+		}
 	}
 
+	ret = smmute_connection_create(serv);
+	if (ret)
+		goto err_close;
+
 	return 0;
+
+err_close:
+	smmute_device_close(&serv->dev);
+	return ret;
 }
 
 void smmute_server_close(struct server *serv)
 {
+	if (serv->opts->mem.unified) {
+		if (smmute_unbind(&serv->dev, getpid(), serv->opts->mem.pasid))
+			pr_err("cannot unbind from device\n");
+	}
+
 	smmute_connection_close(serv);
 	smmute_device_close(&serv->dev);
 }
@@ -576,7 +641,14 @@ int main(int argc, char **argv)
 	struct program_options options = {
 		.backend	= SMMUTE_BACKEND_VFIO,
 		.device		= "/sys/bus/pci/devices/0000:00:03.0",
-		.mem.unified	= false,
+		.mem		= {
+			.unified	= false,
+			.pasid		= 0,
+			.in_file_path	= NULL,
+			.out_file_path	= NULL,
+			.in_file	= -1,
+			.out_file	= -1,
+		}
 	};
 
 	memset(&server, 0, sizeof(server));
