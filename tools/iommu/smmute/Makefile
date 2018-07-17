@@ -20,6 +20,7 @@ SMMUTE		:= $(OUTPUT)smmute
 SPLICE		:= $(OUTPUT)smmute-splice
 MULTI		:= $(OUTPUT)smmute-multi
 TEST_VFIO	:= $(OUTPUT)test-vfio
+TEST_FAULT	:= $(OUTPUT)smmute-fault
 SERVER		:= $(OUTPUT)smmuted
 DRIVERS		:= driver-kernel.o driver-vfio.o driver-ipc.o
 
@@ -28,6 +29,7 @@ ALL		+= $(SPLICE)
 ALL		+= $(MULTI)
 ALL		+= $(SERVER)
 ALL		+= $(TEST_VFIO)
+ALL		+= $(TEST_FAULT)
 
 all: $(ALL)
 
@@ -47,6 +49,9 @@ $(MULTI): $(addprefix $(OUTPUT),multi.o lib.o $(DRIVERS))
 	$(CC) -o $@ $^ $(LIB_LDFLAGS)
 
 $(TEST_VFIO): $(addprefix $(OUTPUT),test-vfio.o lib.o $(DRIVERS))
+	$(CC) -o $@ $^ $(LIB_LDFLAGS)
+
+$(TEST_FAULT): $(addprefix $(OUTPUT),smmute-fault.o lib.o $(DRIVERS))
 	$(CC) -o $@ $^ $(LIB_LDFLAGS)
 
 clean:
