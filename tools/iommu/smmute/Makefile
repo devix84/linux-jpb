@@ -17,9 +17,11 @@ CFLAGS		+= -pthread
 LIB_LDFLAGS	+= -pthread -lrt
 
 SMMUTE		:= $(OUTPUT)smmute
+SPLICE		:= $(OUTPUT)smmute-splice
 DRIVERS		:= driver-kernel.o
 
 ALL		+= $(SMMUTE)
+ALL		+= $(SPLICE)
 
 all: $(ALL)
 
@@ -28,6 +30,9 @@ $(OUTPUT)%.o: $(SRC)%.c
 
 $(SMMUTE): $(addprefix $(OUTPUT),main.o lib.o $(DRIVERS))
 	$(CC) -o $@ $^ $(LIB_LDFLAGS)
+
+$(SPLICE): $(addprefix $(OUTPUT),splice.o)
+	$(CC) -o $@ $^
 
 clean:
 	rm -vf $(OUTPUT)*.o
