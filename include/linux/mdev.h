@@ -61,6 +61,12 @@ struct mdev_device;
  * @mmap:		mmap callback
  *			@mdev: mediated device structure
  *			@vma: vma structure
+ * @set_pasid:		setup a PASID for the mdev
+ *			@mdev: mediated device structure
+ *			@pasid: PASID value
+ * @clear_pasid:	disable the PASID
+ *			@mdev: mediated device structure
+ *			@pasid: PASID value
  * Parent device that support mediated device should be registered with mdev
  * module with mdev_parent_ops structure.
  **/
@@ -81,6 +87,8 @@ struct mdev_parent_ops {
 	long	(*ioctl)(struct mdev_device *mdev, unsigned int cmd,
 			 unsigned long arg);
 	int	(*mmap)(struct mdev_device *mdev, struct vm_area_struct *vma);
+	int	(*set_pasid)(struct mdev_device *mdev, int pasid);
+	int	(*clear_pasid)(struct mdev_device *mdev, int pasid);
 };
 
 /* interface for exporting mdev supported type attributes */
@@ -134,5 +142,8 @@ extern void mdev_unregister_driver(struct mdev_driver *drv);
 extern struct device *mdev_parent_dev(struct mdev_device *mdev);
 extern struct device *mdev_dev(struct mdev_device *mdev);
 extern struct mdev_device *mdev_from_dev(struct device *dev);
+
+struct io_mm *mdev_get_pasid(struct mdev_device *mdev);
+void mdev_put_pasid(struct mdev_device *mdev, struct io_mm *io_mm);
 
 #endif /* MDEV_H */
