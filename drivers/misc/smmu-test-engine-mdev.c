@@ -9,6 +9,7 @@
 
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/eventfd.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/mdev.h>
@@ -25,7 +26,17 @@ struct smmute_mdev {
 	struct smmute_device	*smmute;
 	struct mdev_device	*mdev;
 	size_t			page_nr;
+	unsigned long		msi_vector;
+	struct eventfd_ctx	*msi_trigger;
 };
+
+static irqreturn_t smmute_mdev_msi_handler(int irq, void *arg)
+{
+	struct smmute_mdev *smmute_mdev = arg;
+
+	eventfd_signal(smmute_mdev->msi_trigger, 1);
+	return IRQ_HANDLED;
+}
 
 #define smmute_mdev_for_each_frame(i, smmute_mdev) \
 	for (i = smmute_mdev->page_nr * SMMUTE_FRAMES_PER_PAGE; \
@@ -59,12 +70,45 @@ static int smmute_mdev_clear_pasid(struct mdev_device *mdev, int unused)
 	return smmute_mdev_set_pasid(mdev, 0x100000);
 }
 
+static int smmute_mdev_set_msi(struct smmute_mdev *smmute_mdev)
+{
+	int i;
+	struct smmute_uframe *frame;
+
+	smmute_mdev_for_each_frame(i, smmute_mdev) {
+		/*
+		 * DESIGN BUG: MSI must not be under user control! These should
+		 * be in the privileged frame. Instead we have to poke the user
+		 * frame and hope that the application doesn't misbehave. Yuck!
+		 */
+		frame = smmute_user_frame(smmute_mdev->smmute->pairs, i);
+
+		writel_relaxed(1, &frame->msiaddress);
+		writel_relaxed(smmute_mdev->msi_vector, &frame->msidata);
+		writel_relaxed(0, &frame->msiattr);
+	}
+	return 0;
+}
+
+static int smmute_mdev_clear_msi(struct smmute_mdev *smmute_mdev)
+{
+	int i;
+	struct smmute_uframe *frame;
+
+	smmute_mdev_for_each_frame(i, smmute_mdev) {
+		frame = smmute_user_frame(smmute_mdev->smmute->pairs, i);
+
+		writel_relaxed(0, &frame->msiaddress);
+	}
+	return 0;
+}
+
 static long smmute_mdev_get_info(struct smmute_mdev *smmute_mdev,
 				 struct vfio_device_info *info)
 {
 	info->flags		= VFIO_DEVICE_FLAGS_PLATFORM;
 	info->num_regions	= 1;
-	info->num_irqs		= 0;
+	info->num_irqs		= 1;
 	return 0;
 }
 
@@ -89,13 +133,76 @@ static long smmute_mdev_get_irq_info(struct smmute_mdev *smmute_mdev,
 
 	info->flags		= VFIO_IRQ_INFO_EVENTFD;
 	info->count		= 1;
-	return -ENOSYS;
+	return 0;
 }
 
 static long smmute_mdev_set_irqs(struct mdev_device *mdev,
 				 void __user *arg)
 {
-	return -ENOSYS;
+	int ret;
+	struct device *dev = mdev_dev(mdev);
+	struct smmute_mdev *smmute_mdev = mdev_get_drvdata(mdev);
+	struct pci_dev *pdev = to_pci_dev(mdev_parent_dev(mdev));
+	/* This is just a demo, we don't support disabling or masking */
+	u32 flag_mask = VFIO_IRQ_SET_ACTION_TRIGGER | VFIO_IRQ_SET_DATA_EVENTFD;
+	struct eventfd_ctx *trigger;
+	struct {
+		struct vfio_irq_set	hdr;
+		s32			eventfd;
+	} irq_set;
+
+	if (copy_from_user(&irq_set, arg, sizeof(irq_set)))
+		return -EFAULT;
+
+	if (irq_set.hdr.argsz < sizeof(irq_set))
+		return -EINVAL;
+
+	if (irq_set.hdr.index != 0 || irq_set.hdr.start != 0 ||
+	    irq_set.hdr.count != 1)
+		return -EINVAL;
+
+	if (irq_set.hdr.flags != flag_mask) {
+		dev_err(dev, "invalid IRQ flags\n");
+		return -EINVAL;
+	}
+
+	if (smmute_mdev->msi_trigger)
+		return -EEXIST;
+
+	trigger = eventfd_ctx_fdget(irq_set.eventfd);
+	if (IS_ERR(trigger)) {
+		dev_err(dev, "could not get eventfd %d\n", irq_set.eventfd);
+		return PTR_ERR(trigger);
+	}
+
+	ret = pci_irq_vector(pdev, smmute_mdev->msi_vector);
+	if (ret < 0) {
+		dev_err(dev, "could not get IRQ for vector %lu\n",
+			smmute_mdev->msi_vector);
+		goto err_put_fd;
+	}
+
+	ret = request_irq(ret, smmute_mdev_msi_handler, 0, dev_name(dev),
+			  smmute_mdev);
+	if (ret) {
+		dev_err(dev, "could not request MSI %lu\n",
+			smmute_mdev->msi_vector);
+		goto err_put_fd;
+	}
+
+	ret = smmute_mdev_set_msi(smmute_mdev);
+	if (ret)
+		goto err_free_irq;
+
+	smmute_mdev->msi_trigger = trigger;
+
+	return 0;
+
+err_free_irq:
+	free_irq(pci_irq_vector(pdev, smmute_mdev->msi_vector), smmute_mdev);
+err_put_fd:
+	eventfd_ctx_put(trigger);
+	return ret;
 }
 
 static long smmute_mdev_ioctl(struct mdev_device *mdev, unsigned int cmd,
@@ -228,6 +335,20 @@ static int smmute_mdev_open(struct mdev_device *mdev)
 
 static void smmute_mdev_close(struct mdev_device *mdev)
 {
+	struct smmute_mdev *smmute_mdev = mdev_get_drvdata(mdev);
+	struct device *parent = mdev_parent_dev(mdev);
+
+	if (smmute_mdev->msi_trigger) {
+		int irq = pci_irq_vector(to_pci_dev(parent),
+					 smmute_mdev->msi_vector);
+
+		smmute_mdev_clear_msi(smmute_mdev);
+
+		if (!WARN_ON(irq < 0))
+			free_irq(irq, smmute_mdev);
+		eventfd_ctx_put(smmute_mdev->msi_trigger);
+		smmute_mdev->msi_trigger = NULL;
+	}
 }
 
 static int smmute_mdev_create(struct kobject *kobj, struct mdev_device *mdev)
@@ -263,15 +384,20 @@ static int smmute_mdev_create(struct kobject *kobj, struct mdev_device *mdev)
 	smmute_mdev->smmute = smmute;
 	smmute_mdev->mdev = mdev;
 
+	/* Use the MSI vector corresponding to this page number */
+	smmute_mdev->msi_vector = smmute->nr_msix_entries +
+		(smmute_mdev->page_nr - smmute->mdev.pages_first);
+
 	mdev_set_drvdata(mdev, smmute_mdev);
 
 	smmute_mdev_clear_pasid(mdev, 0);
+	smmute_mdev_clear_msi(smmute_mdev);
 
 	dev_info(dev, "created mdev %s\n", dev_name(mdev_dev(mdev)));
-	dev_info(dev, " with page %zu frames 0x%zx-0x%zx\n",
+	dev_info(dev, " with page %zu frames 0x%zx-0x%zx MSI %lu\n",
 		 smmute_mdev->page_nr, smmute_mdev->page_nr *
 		 SMMUTE_FRAMES_PER_PAGE, (smmute_mdev->page_nr + 1) *
-		 SMMUTE_FRAMES_PER_PAGE - 1);
+		 SMMUTE_FRAMES_PER_PAGE - 1, smmute_mdev->msi_vector);
 
 	return 0;
 

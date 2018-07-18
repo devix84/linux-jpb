@@ -2378,7 +2378,9 @@ static int smmute_pci_msi_enable(struct pci_dev *pdev)
 			pci_msix_vec_count(pdev));
 
 	nr_msis = min_t(size_t, SMMUTE_MAX_MSIS,
-			smmute->nr_pairs * SMMUTE_FRAMES_PER_PAGE);
+			smmute->nr_pairs * SMMUTE_FRAMES_PER_PAGE)
+		  + SMMUTE_MDEV_NR;
+
 	entries = devm_kmalloc(&pdev->dev, sizeof(struct msix_entry) * nr_msis,
 			       GFP_KERNEL);
 
@@ -2398,7 +2400,7 @@ static int smmute_pci_msi_enable(struct pci_dev *pdev)
 		return ret;
 	}
 
-	smmute->nr_msix_entries = ret;
+	smmute->nr_msix_entries = ret - SMMUTE_MDEV_NR;
 	dev_dbg(&pdev->dev, "requested %d MSIs, got %d\n", nr_msis, ret);
 
 	return 0;
