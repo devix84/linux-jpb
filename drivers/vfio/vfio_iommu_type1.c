@@ -76,6 +76,7 @@ struct vfio_domain {
 	struct list_head	group_list;
 	int			prot;		/* IOMMU_CACHE */
 	bool			fgsp;		/* Fine-grained super pages */
+	struct io_mm		*io_mm;
 };
 
 struct vfio_dma {
@@ -121,7 +122,9 @@ struct vfio_regions {
 };
 
 #define IS_IOMMU_CAP_DOMAIN_IN_CONTAINER(iommu)	\
-					(!list_empty(&iommu->domain_list))
+					(!list_empty(&iommu->domain_list) ||	\
+					 ((iommu)->external_domain &&		\
+					  (iommu)->external_domain->io_mm))
 
 static int put_pfn(unsigned long pfn, int prot);
 
@@ -714,12 +717,14 @@ static size_t unmap_unpin_fast(struct vfio_domain *domain,
 	struct vfio_regions *entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 
 	if (entry) {
-		unmapped = iommu_unmap_fast(domain->domain, *iova, len);
+		unmapped = iommu_sva_unmap_fast(domain->domain, domain->io_mm,
+						*iova, len);
 
 		if (!unmapped) {
 			kfree(entry);
 		} else {
-			iommu_tlb_range_add(domain->domain, *iova, unmapped);
+			iommu_sva_tlb_range_add(domain->domain, domain->io_mm,
+						*iova, unmapped);
 			entry->iova = *iova;
 			entry->phys = phys;
 			entry->len  = unmapped;
@@ -748,7 +753,8 @@ static size_t unmap_unpin_slow(struct vfio_domain *domain,
 			       size_t len, phys_addr_t phys,
 			       long *unlocked)
 {
-	size_t unmapped = iommu_unmap(domain->domain, *iova, len);
+	size_t unmapped = iommu_sva_unmap(domain->domain, domain->io_mm, *iova,
+					  len);
 
 	if (unmapped) {
 		*unlocked += vfio_unpin_pages_remote(dma, *iova,
@@ -783,19 +789,24 @@ static long vfio_unmap_unpin(struct vfio_iommu *iommu, struct vfio_dma *dma,
 	 * pfns to unpin.  The rest need to be unmapped in advance so we have
 	 * no iommu translations remaining when the pages are unpinned.
 	 */
-	domain = d = list_first_entry(&iommu->domain_list,
-				      struct vfio_domain, next);
+	if (list_empty(&iommu->domain_list)) {
+		domain = iommu->external_domain;
+	} else {
+		domain = d = list_first_entry(&iommu->domain_list,
+					      struct vfio_domain, next);
 
-	list_for_each_entry_continue(d, &iommu->domain_list, next) {
-		iommu_unmap(d->domain, dma->iova, dma->size);
-		cond_resched();
+		list_for_each_entry_continue(d, &iommu->domain_list, next) {
+			iommu_unmap(d->domain, dma->iova, dma->size);
+			cond_resched();
+		}
 	}
 
 	while (iova < end) {
 		size_t unmapped, len;
 		phys_addr_t phys, next;
 
-		phys = iommu_iova_to_phys(domain->domain, iova);
+		phys = iommu_sva_iova_to_phys(domain->domain, domain->io_mm,
+					      iova);
 		if (WARN_ON(!phys)) {
 			iova += PAGE_SIZE;
 			continue;
@@ -808,7 +819,9 @@ static long vfio_unmap_unpin(struct vfio_iommu *iommu, struct vfio_dma *dma,
 		 */
 		for (len = PAGE_SIZE;
 		     !domain->fgsp && iova + len < end; len += PAGE_SIZE) {
-			next = iommu_iova_to_phys(domain->domain, iova + len);
+			next = iommu_sva_iova_to_phys(domain->domain,
+						      domain->io_mm, iova +
+						      len);
 			if (next != phys + len)
 				break;
 		}
@@ -1019,6 +1032,13 @@ static int vfio_iommu_map(struct vfio_iommu *iommu, dma_addr_t iova,
 {
 	struct vfio_domain *d;
 	int ret;
+
+	if (list_empty(&iommu->domain_list)) {
+		d = iommu->external_domain;
+		return iommu_sva_map(d->domain, d->io_mm, iova,
+				     (phys_addr_t)pfn << PAGE_SHIFT,
+				     npage << PAGE_SHIFT, prot | d->prot);
+	}
 
 	list_for_each_entry(d, &iommu->domain_list, next) {
 		ret = iommu_map(d->domain, iova, (phys_addr_t)pfn << PAGE_SHIFT,
@@ -1534,6 +1554,44 @@ out_reattach:
 	return 1;
 }
 
+static int vfio_mdev_alloc_pasid(struct device *dev, void *data)
+{
+	struct vfio_domain *domain = data;
+	struct mdev_device *mdev;
+
+	if (domain->io_mm)
+		/* Only group singletons supported */
+		return -EINVAL;
+
+	mdev = mdev_from_dev(dev);
+	if (!mdev)
+		return -EINVAL;
+
+	domain->io_mm = mdev_get_pasid(mdev);
+	if (!domain->io_mm)
+		return -ENODEV;
+
+	domain->domain = iommu_get_domain_for_dev(mdev_parent_dev(mdev));
+
+	return 0;
+}
+
+static int vfio_mdev_free_pasid(struct device *dev, void *data)
+{
+	struct vfio_domain *domain = data;
+	struct mdev_device *mdev;
+
+	if (!domain->io_mm)
+		return -EINVAL;
+
+	mdev = mdev_from_dev(dev);
+	if (!mdev)
+		return -EINVAL;
+
+	mdev_put_pasid(mdev, domain->io_mm);
+	return 1;
+}
+
 static int vfio_iommu_type1_attach_group(void *iommu_data,
 					 struct iommu_group *iommu_group)
 {
@@ -1583,11 +1641,25 @@ static int vfio_iommu_type1_attach_group(void *iommu_data,
 			if (!iommu->external_domain) {
 				INIT_LIST_HEAD(&domain->group_list);
 				iommu->external_domain = domain;
-			} else
+			} else {
 				kfree(domain);
+				if (iommu->external_domain->io_mm) {
+					mutex_unlock(&iommu->lock);
+					return -EINVAL; /* unsupported */
+				}
+			}
 
 			list_add(&group->next,
 				 &iommu->external_domain->group_list);
+
+			/*
+			 * HACK: for an mdev, find the parent domain, and
+			 * allocate a PASID. MAP/UNMAP ioctl will alter this new
+			 * address space.
+			 */
+			iommu_group_for_each_dev(iommu_group, domain,
+						 vfio_mdev_alloc_pasid);
+
 			mutex_unlock(&iommu->lock);
 			return 0;
 		}
@@ -1738,6 +1810,12 @@ static void vfio_iommu_type1_detach_group(void *iommu_data,
 	if (iommu->external_domain) {
 		group = find_iommu_group(iommu->external_domain, iommu_group);
 		if (group) {
+			domain = iommu->external_domain;
+			if (domain->io_mm)
+				/* TODO ensure that mdev symbols are still here? */
+				iommu_group_for_each_dev(group->iommu_group, domain,
+							 vfio_mdev_free_pasid);
+
 			list_del(&group->next);
 			kfree(group);
 
@@ -1932,7 +2010,7 @@ static long vfio_iommu_type1_bind_process(struct vfio_iommu *iommu,
 	}
 
 	mutex_lock(&iommu->lock);
-	if (!IS_IOMMU_CAP_DOMAIN_IN_CONTAINER(iommu)) {
+	if (list_empty(&iommu->domain_list)) {
 		ret = -EINVAL;
 		goto out_unlock;
 	}
