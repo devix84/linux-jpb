@@ -24,7 +24,7 @@ TEST_FAULT	:= $(OUTPUT)smmute-fault
 TEST_REPLAY	:= $(OUTPUT)test-vfio-replay
 SERVER		:= $(OUTPUT)smmuted
 TEST_BIND	:= $(OUTPUT)smmute-bind
-DRIVERS		:= driver-kernel.o driver-vfio.o driver-ipc.o
+DRIVERS		:= driver-kernel.o driver-vfio.o driver-ipc.o driver-mdev.o
 
 ALL		+= $(SMMUTE)
 ALL		+= $(SPLICE)

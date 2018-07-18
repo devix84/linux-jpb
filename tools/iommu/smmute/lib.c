@@ -8,11 +8,13 @@
 extern struct smmute_device_ops kernel_ops;
 extern struct smmute_device_ops vfio_ops;
 extern struct smmute_device_ops ipc_ops;
+extern struct smmute_device_ops mdev_ops;
 
 static struct smmute_device_ops *backend_ops[SMMUTE_NR_BACKENDS] = {
 	[SMMUTE_BACKEND_KERNEL]		= &kernel_ops,
 	[SMMUTE_BACKEND_VFIO]		= &vfio_ops,
 	[SMMUTE_BACKEND_IPC]		= &ipc_ops,
+	[SMMUTE_BACKEND_MDEV]		= &mdev_ops,
 };
 
 void *smmute_lib_alloc_buffer(int fd, size_t size, int prot,

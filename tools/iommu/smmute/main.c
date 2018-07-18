@@ -874,6 +874,8 @@ static int parse_options(int argc, char *argv[], struct program_options *opts)
 				opts->backend = SMMUTE_BACKEND_KERNEL;
 			} else if (optarg[0] == 'i') {
 				opts->backend = SMMUTE_BACKEND_IPC;
+			} else if (optarg[0] == 'm') {
+				opts->backend = SMMUTE_BACKEND_MDEV;
 			} else {
 				pr_err("unkown backend '%s'\n", optarg);
 				return 1;

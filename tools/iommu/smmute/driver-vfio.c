@@ -43,12 +43,10 @@ static void smmute_vfio_free_buffer(struct smmute_dev *dev, void *buf, size_t si
 	smmute_lib_free_buffer(buf, size, opts);
 }
 
-static int smmute_vfio_map_buffer(struct smmute_dev *dev, void *va,
-				  dma_addr_t *iova, size_t size, int prot,
-				  struct smmute_mem_options *opts)
+int smmute_vfio_container_map(int fd, void *va, dma_addr_t *iova, size_t size,
+			      int prot, struct smmute_mem_options *opts)
 {
 	int ret;
-	struct smmute_vdev *vdev = to_vdev(dev);
 	struct vfio_iommu_type1_dma_map map = {
 		.argsz		= sizeof(map),
 		.flags		= 0,
@@ -74,13 +72,55 @@ static int smmute_vfio_map_buffer(struct smmute_dev *dev, void *va,
 	map.iova	= *iova;
 	map.vaddr	= (uint64_t)va;
 
-	ret = ioctl(vdev->group->container->fd, VFIO_IOMMU_MAP_DMA, &map);
+	ret = ioctl(fd, VFIO_IOMMU_MAP_DMA, &map);
 	if (ret) {
 		perror("VFIO_IOMMU_MAP_DMA");
 		return errno;
 	}
 
 	return ret;
+}
+
+int smmute_vfio_container_unmap(int fd, void *va, dma_addr_t iova, size_t size,
+				struct smmute_mem_options *opts)
+{
+	int ret;
+	struct vfio_iommu_type1_dma_unmap unmap = {
+		.argsz	= sizeof(unmap),
+		.iova	= iova,
+		.size	= ALIGN(size, PAGE_SIZE),
+	};
+
+	if (opts->unified)
+		return 0;
+
+	ret = ioctl(fd, VFIO_IOMMU_UNMAP_DMA, &unmap);
+	if (ret) {
+		perror("VFIO_IOMMU_UNMAP_DMA");
+		return errno;
+	}
+
+	return ret;
+}
+
+static int smmute_vfio_map_buffer(struct smmute_dev *dev, void *va,
+				  dma_addr_t *iova, size_t size, int prot,
+				  struct smmute_mem_options *opts)
+{
+	struct smmute_vdev *vdev = to_vdev(dev);
+
+	return smmute_vfio_container_map(vdev->group->container->fd, va, iova,
+					 size, prot, opts);
+}
+
+static int smmute_vfio_unmap_buffer(struct smmute_dev *dev, void *va,
+				    dma_addr_t iova, size_t size,
+				    struct smmute_mem_options *opts)
+{
+	struct smmute_vdev *vdev = to_vdev(dev);
+
+	return smmute_vfio_container_unmap(vdev->group->container->fd, va, iova,
+					   size, opts);
 }
 
 struct smmute_vfio_bind {
@@ -136,34 +176,9 @@ static int smmute_vfio_unbind(struct smmute_dev *dev, pid_t pid, int pasid)
 	return ret;
 }
 
-static int smmute_vfio_unmap_buffer(struct smmute_dev *dev, void *va,
-				    dma_addr_t iova, size_t size,
-				    struct smmute_mem_options *opts)
-{
-	int ret;
-	struct smmute_vdev *vdev = to_vdev(dev);
-	struct vfio_iommu_type1_dma_unmap unmap = {
-		.argsz	= sizeof(unmap),
-		.iova	= iova,
-		.size	= ALIGN(size, PAGE_SIZE),
-	};
-
-	if (opts->unified)
-		return 0;
-
-	ret = ioctl(vdev->group->container->fd, VFIO_IOMMU_UNMAP_DMA, &unmap);
-	if (ret) {
-		perror("VFIO_IOMMU_UNMAP_DMA");
-		return errno;
-	}
-
-	return ret;
-}
-
-static int smmute_vfio_alloc_frame(struct smmute_vdev *vdev)
+int smmute_vfio_alloc_frame(struct smmute_vfio_frames *frames)
 {
 	int i, ret = -ENOSPC;
-	struct smmute_vfio_frames *frames = &vdev->shr->frames;
 
 	pthread_mutex_lock(&frames->lock);
 
@@ -187,9 +202,8 @@ static int smmute_vfio_alloc_frame(struct smmute_vdev *vdev)
 	return ret;
 }
 
-static void smmute_vfio_free_frame(struct smmute_vdev *vdev, int frame)
+void smmute_vfio_free_frame(struct smmute_vfio_frames *frames, int frame)
 {
-	struct smmute_vfio_frames *frames = &vdev->shr->frames;
 	long mask = 1 << (frame % BITS_PER_LONG);
 
 	pthread_mutex_lock(&frames->lock);
@@ -213,7 +227,7 @@ static int smmute_vfio_launch_transaction(struct smmute_dev *dev, int cmd,
 	volatile struct smmute_vfio_uframe *uframe;
 	volatile struct smmute_vfio_pframe *pframe;
 
-	frame_nr = smmute_vfio_alloc_frame(vdev);
+	frame_nr = smmute_vfio_alloc_frame(&vdev->shr->frames);
 	if (frame_nr < 0)
 		return -frame_nr;
 
@@ -288,7 +302,7 @@ err_free_transaction:
 	free(transaction);
 
 err_free_frame:
-	smmute_vfio_free_frame(vdev, frame_nr);
+	smmute_vfio_free_frame(&vdev->shr->frames, frame_nr);
 
 	return ret;
 }
@@ -357,7 +371,7 @@ static int smmute_vfio_get_result(struct smmute_dev *dev,
 		/* Result of a SUM64 */
 		result->value = uframe->udata[1];
 
-	smmute_vfio_free_frame(vdev, transaction->frame);
+	smmute_vfio_free_frame(&vdev->shr->frames, transaction->frame);
 
 	pthread_mutex_lock(&transactions->lock);
 	list_del(&transaction->list);
@@ -641,7 +655,7 @@ static void smmute_vfio_group_destroy(struct smmute_iommu_group *group)
 	free(group);
 }
 
-static struct smmute_iommu_group *smmute_vfio_group_get(unsigned long group_id)
+struct smmute_iommu_group *smmute_vfio_group_get(unsigned long group_id)
 {
 	struct smmute_iommu_group *tmp;
 	struct smmute_iommu_group *group = NULL;
@@ -671,7 +685,7 @@ out_unlock:
 	return group;
 }
 
-static void smmute_vfio_group_put(struct smmute_iommu_group *group)
+void smmute_vfio_group_put(struct smmute_iommu_group *group)
 {
 	pthread_mutex_lock(&groups_mutex);
 	if (--group->ref == 0) {
@@ -682,13 +696,44 @@ static void smmute_vfio_group_put(struct smmute_iommu_group *group)
 	pthread_mutex_unlock(&groups_mutex);
 }
 
+long smmute_vfio_group_id(const char *path)
+{
+	char group_path[VFIO_PATH_MAX];
+	unsigned long group_id;
+	char *group_id_str;
+	char *group_cpath;
+	int ret;
+
+	/* Find associated group */
+	ret = snprintf(group_path, VFIO_PATH_MAX, "%s/iommu_group", path);
+	if (ret <= 0) {
+		pr_err("group path too long\n");
+		return -errno;
+	}
+
+	group_cpath = realpath(group_path, NULL);
+	if (!group_cpath) {
+		pr_err("invalid group path '%s'\n", group_path);
+		return -errno;
+	}
+
+	group_id_str = basename(group_cpath);
+	errno = 0;
+	group_id = strtol(group_id_str, NULL, 10);
+	free(group_cpath);
+	if (errno) {
+		pr_err("invalid group ID '%s'\n", group_id_str);
+		return -errno;
+	}
+	pr_debug("VFIO group ID: %lu\n", group_id);
+
+	return group_id;
+}
+
 static int smmute_vfio_open(struct smmute_dev *dev, const char *path, int flags)
 {
 	int ret;
-	char *group_cpath;
-	char *group_id_str;
-	unsigned long group_id;
-	char group_path[VFIO_PATH_MAX];
+	long group_id;
 	struct smmute_vdev *vdev;
 
 	vdev = calloc(1, sizeof(*vdev));
@@ -710,35 +755,16 @@ static int smmute_vfio_open(struct smmute_dev *dev, const char *path, int flags)
 	}
 
 	pr_debug("VFIO device path: %s\n", vdev->path);
-
-	/* Find associated group */
-	ret = snprintf(group_path, VFIO_PATH_MAX, "%s/iommu_group", vdev->path);
-	if (ret <= 0) {
-		pr_err("group path too long\n");
+	group_id = smmute_vfio_group_id(vdev->name);
+	if (group_id < 0) {
+		ret = -group_id;
 		goto err_free_dev_path;
 	}
-
-	group_cpath = realpath(group_path, NULL);
-	if (!group_cpath) {
-		ret = errno;
-		pr_err("invalid group path '%s'\n", group_path);
-		goto err_free_dev_path;
-	}
-
-	group_id_str = basename(group_cpath);
-	errno = 0;
-	group_id = strtoul(group_id_str, NULL, 10);
-	if (errno) {
-		ret = errno;
-		pr_err("invalid group ID '%s'\n", group_id_str);
-		goto err_free_group_path;
-	}
-	pr_debug("VFIO group ID: %lu\n", group_id);
 
 	vdev->group = smmute_vfio_group_get(group_id);
 	if (!vdev->group) {
 		ret = errno;
-		goto err_free_group_path;
+		goto err_free_dev_path;
 	}
 
 	vdev->name = strdup(basename(vdev->path));
@@ -763,8 +789,6 @@ static int smmute_vfio_open(struct smmute_dev *dev, const char *path, int flags)
 
 	dev->private = vdev;
 
-	free(group_cpath);
-
 	return 0;
 
 err_free_name:
@@ -772,9 +796,6 @@ err_free_name:
 
 err_release_group:
 	smmute_vfio_group_put(vdev->group);
-
-err_free_group_path:
-	free(group_cpath);
 
 err_free_dev_path:
 	free(vdev->path);

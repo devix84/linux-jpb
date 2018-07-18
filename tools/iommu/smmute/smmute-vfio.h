@@ -138,4 +138,15 @@ struct smmute_vdev {
 	struct smmute_vdev_shared	*shr;
 };
 
+long smmute_vfio_group_id(const char *path);
+struct smmute_iommu_group *smmute_vfio_group_get(unsigned long group_id);
+void smmute_vfio_group_put(struct smmute_iommu_group *group);
+
+int smmute_vfio_alloc_frame(struct smmute_vfio_frames *frames);
+void smmute_vfio_free_frame(struct smmute_vfio_frames *frames, int frame);
+int smmute_vfio_container_map(int fd, void *va, dma_addr_t *iova, size_t size,
+			      int prot, struct smmute_mem_options *opts);
+int smmute_vfio_container_unmap(int fd, void *va, dma_addr_t iova, size_t size,
+				struct smmute_mem_options *opts);
+
 #endif
