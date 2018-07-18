@@ -346,15 +346,6 @@ static void smmute_transaction_free(struct smmute_file_desc *fd,
 	mutex_unlock(&fd->transactions_mutex);
 }
 
-/* Not upstream yet */
-#define iommu_sva_device_init(...)		(-ENOSYS)
-#define iommu_sva_device_shutdown(...)
-#define iommu_register_mm_exit_handler(...)	(-ENOSYS)
-#define iommu_unregister_mm_exit_handler(...)
-#define iommu_sva_bind_device(...)		(-ENOSYS)
-#define iommu_sva_unbind_device(...)		(-ENOSYS)
-
-__maybe_unused
 static int smmute_mm_exit_handler(struct device *dev, int pasid, void *data)
 {
 	/* data is smmu_task passed to bind. */
