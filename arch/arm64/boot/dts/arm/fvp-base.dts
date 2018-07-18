@@ -11,8 +11,7 @@
 
 /memreserve/ 0x80000000 0x00010000;
 
-/ {
-};
+#include "rtsm_ve-motherboard.dtsi"
 
 / {
 	model = "FVP Base";
@@ -152,8 +151,10 @@
 				<0x0 0x0 0x0 0x4 &gic 0x0 0x0 0x0 0xab 0x4>;
 		interrupt-map-mask = <0x0 0x0 0x0 0x7>;
 		msi-map = <0 &its 0 0x10000>;
-		/*#stream-id-cells = <0>;*/
-		iommus = <&smmu>;
+		iommu-map = <0 &smmu 0 0x10000>;
+
+		dma-coherent;
+		ats-supported;
 	};
 
 /*
@@ -182,7 +183,7 @@
 		msi-parent = <&its 0x10000>;
 	};
 
-	smb {
+	smb@8000000 {
 		compatible = "simple-bus";
 
 		#address-cells = <2>;
@@ -239,8 +240,6 @@
 				<0 0 40 &gic 0 0 0 40 4>,
 				<0 0 41 &gic 0 0 0 41 4>,
 				<0 0 42 &gic 0 0 0 42 4>;
-
-		/include/ "rtsm_ve-motherboard.dtsi"
 	};
 
 	panels {
