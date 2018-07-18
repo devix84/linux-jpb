@@ -59,3 +59,4 @@ obj-$(CONFIG_PCI_ENDPOINT_TEST)	+= pci_endpoint_test.o
 obj-$(CONFIG_OCXL)		+= ocxl/
 obj-$(CONFIG_MISC_RTSX)		+= cardreader/
 obj-$(CONFIG_SMMU_TEST_ENGINE)	+= smmu-test-engine.o
+obj-$(CONFIG_SMMU_TEST_ENGINE_MDEV)	+= smmu-test-engine-mdev.o

@@ -2626,6 +2626,12 @@ static int smmute_pci_probe(struct pci_dev *pdev, const struct pci_device_id *de
 	if (ret)
 		goto err_unmap_pairs;
 
+	/* If enough space available, reserve a bunch of 64k pages for mdevs */
+	if (smmute->nr_pairs > SMMUTE_MDEV_NR) {
+		smmute_mdev_add(smmute, SMMUTE_MDEV_NR);
+		smmute->nr_pairs -= SMMUTE_MDEV_NR;
+	}
+
 	ret = smmute_common_probe(smmute);
 	if (ret)
 		goto err_disable_msi;

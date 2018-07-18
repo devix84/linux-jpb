@@ -183,6 +183,17 @@ struct smmute_device {
 
 	/* Shared virtual addressing */
 	bool				sva;
+
+#ifdef CONFIG_SMMU_TEST_ENGINE_MDEV
+	/* Mdev state */
+	struct {
+		size_t			pages_first;
+		size_t			pages_max;
+		size_t			pages_free;
+		struct ida		pages;
+		struct mutex		mutex;
+	} mdev;
+#endif
 };
 
 #define SMMUTE_DMA_EMPTY	0
@@ -337,5 +348,17 @@ struct smmute_file_desc {
 
 	struct kobject			kobj;
 };
+
+#ifdef CONFIG_SMMU_TEST_ENGINE_MDEV
+#define SMMUTE_MDEV_NR 8
+int smmute_mdev_add(struct smmute_device *smmute, size_t count);
+
+#else /* !CONFIG_SMMU_TEST_ENGINE_MDEV */
+#define SMMUTE_MDEV_NR 0
+static inline int smmute_mdev_add(struct smmute_device *smmute, size_t count)
+{
+	return -EINVAL;
+}
+#endif
 
 #endif /* __LINUX_SMMU_TEST_ENGINE_H */

@@ -519,6 +519,16 @@ config SMMU_TEST_ENGINE
 	help
 	  PCI driver for SMMU TestEngine.
 
+config SMMU_TEST_ENGINE_MDEV
+	bool "Driver for sub-assignment of SMMU Test Engine"
+	depends on SMMU_TEST_ENGINE
+	select VFIO_MDEV
+	select VFIO_MDEV_DEVICE
+	default y # Not for upsteam!
+	help
+	  Driver for sub-assigning frames of the SMMU Test Engine
+
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
