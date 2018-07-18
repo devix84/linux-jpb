@@ -1,9 +1,11 @@
 #include <libgen.h>
 #include <limits.h>
 #include <linux/vfio.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -23,6 +25,7 @@ struct smmute_mdev {
 	struct smmute_vfio_transactions	transactions;
 	struct smmute_vfio_frames	*frames;
 	int				frames_offset;
+	int				eventfd;
 };
 
 static void *smmute_mdev_alloc_buffer(struct smmute_dev *dev, size_t size,
@@ -145,16 +148,20 @@ err_free_frame:
 static int smmute_mdev_get_result(struct smmute_dev *dev,
 				  struct smmute_transaction_result *result)
 {
+	int ret;
 	uint32_t cmd;
-	bool done = false;
+	uint64_t event;
 	volatile struct smmute_vfio_uframe *uframe;
 	struct smmute_vfio_transaction *tmp;
 	struct smmute_vfio_transaction *transaction = NULL;
 	struct smmute_mdev *mdev = to_mdev(dev);
 	struct smmute_vfio_transactions *transactions = &mdev->transactions;
-	unsigned long long cnt = 0;
-	unsigned long long poll_delay = 10000; // us
-	unsigned long long timeout_cnt = 60000000 / poll_delay; // 60s
+	unsigned long long poll_delay = 60000; // ms
+
+	struct pollfd pollfd = {
+		.fd = mdev->eventfd,
+		.events = POLLIN,
+	};
 
 	pthread_mutex_lock(&transactions->lock);
 	list_for_each_entry(tmp, &transactions->list, list) {
@@ -170,21 +177,17 @@ static int smmute_mdev_get_result(struct smmute_dev *dev,
 
 	uframe = smmute_vfio_get_uframe(mdev->frames->pages, transaction->frame);
 
-	/* TODO: non-blocking */
-	/* TODO: irqfd */
-	do {
-		cmd = uframe->cmd;
+	ret = poll(&pollfd, 1, poll_delay);
+	if (ret < 0)
+		perror("poll");
+	else if (ret == 0)
+		pr_err("poll timed out\n");
+	else if (pollfd.revents & ~POLLIN || !pollfd.revents)
+		pr_err("poll failed with 0x%x\n", pollfd.revents);
 
-		if (cmd == ENGINE_RAND48 || cmd == ENGINE_MEMCPY || cmd == ENGINE_SUM64) {
-			usleep(poll_delay);
-			cnt++;
-		} else {
-			done = true;
-		}
-	} while (!done && cnt < timeout_cnt);
-
-	if (cnt >= timeout_cnt)
-		pr_err("Result poll timed out\n");
+	if (ret > 0 && pollfd.revents & POLLIN)
+		read(mdev->eventfd, &event, 8);
+	cmd = uframe->cmd;
 
 	switch (cmd) {
 	case ENGINE_FRAME_MISCONFIGURED:
@@ -213,6 +216,46 @@ static int smmute_mdev_get_result(struct smmute_dev *dev,
 	pthread_mutex_unlock(&transactions->lock);
 
 	free(transaction);
+
+	return 0;
+}
+
+static int smmute_mdev_init_irq(struct smmute_mdev *mdev)
+{
+	int ret;
+	struct vfio_irq_info info = {
+		.argsz	= sizeof(info),
+	};
+	struct {
+		struct vfio_irq_set	hdr;
+		s32			eventfd;
+	} irq_set = {
+		.hdr.argsz		= sizeof(irq_set),
+		.hdr.flags		= VFIO_IRQ_SET_DATA_EVENTFD |
+					  VFIO_IRQ_SET_ACTION_TRIGGER,
+		.hdr.count		= 1,
+	};
+
+	ret = ioctl(mdev->fd, VFIO_DEVICE_GET_IRQ_INFO, &info);
+	if (ret) {
+		perror("VFIO_DEVICE_GET_IRQ_INFO");
+		return ENODEV;
+	}
+
+	if (info.count != 1 || info.flags != VFIO_IRQ_INFO_EVENTFD) {
+		pr_err("invalid IRQ info\n");
+		return EINVAL;
+	}
+
+	irq_set.eventfd = mdev->eventfd = eventfd(0, 0);
+	if (mdev->eventfd < 0)
+		return errno;
+
+	ret = ioctl(mdev->fd, VFIO_DEVICE_SET_IRQS, &irq_set);
+	if (ret) {
+		perror("VFIO_DEVICE_SET_IRQS");
+		return ENODEV;
+	}
 
 	return 0;
 }
@@ -286,11 +329,17 @@ static int smmute_mdev_init_dev(struct smmute_mdev *mdev)
 		goto err_unmap_pages;
 	}
 
+	ret = smmute_mdev_init_irq(mdev);
+	if (ret)
+		goto err_free_bitmap;
+
 	INIT_LIST_HEAD(&mdev->transactions.list);
 	pthread_mutex_init(&mdev->transactions.lock, NULL);
 
 	return 0;
 
+err_free_bitmap:
+	free(frames->bitmap);
 err_unmap_pages:
 	munmap(frames->pages, frames->size);
 
