@@ -12,6 +12,8 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 
+#include <trace/events/iommu.h>
+
 /**
  * DOC: io_mm model
  *
@@ -175,6 +177,7 @@ io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 		goto err_free_mm;
 	}
 
+	trace_io_mm_alloc(io_mm);
 	return io_mm;
 
 err_free_mm:
@@ -242,6 +245,7 @@ static void io_mm_free(struct rcu_head *rcu)
 	io_mm = container_of(rcu, struct io_mm, rcu);
 	mm = io_mm->mm;
 
+	trace_io_mm_free(io_mm);
 	io_mm->release(io_mm);
 	mmdrop(mm);
 }
@@ -257,6 +261,7 @@ static void io_mm_release(struct kref *kref)
 	idr_remove(&iommu_pasid_idr, io_mm->pasid);
 
 	if (io_mm_is_private(io_mm)) {
+		trace_io_mm_free(io_mm);
 		io_mm->release(io_mm);
 		return;
 	}
@@ -360,6 +365,8 @@ static int io_mm_attach(struct iommu_domain *domain, struct device *dev,
 	list_add(&bond->dev_head, &param->mm_list);
 	spin_unlock(&iommu_sva_lock);
 
+	trace_io_mm_attach(io_mm, dev);
+
 	return 0;
 }
 
@@ -388,10 +395,14 @@ static void io_mm_detach_locked(struct iommu_bond *bond, bool wait)
 				    iommu_sva_lock);
 		if (!do_detach)
 			return;
+		trace_io_mm_detach(bond->io_mm, bond->dev);
 
 	} else if (!refcount_dec_and_test(&bond->refs)) {
 		/* unbind() is waiting to free the bond */
+		trace_io_mm_exit_nodetach(bond->io_mm, bond->dev);
 		return;
+	} else {
+		trace_io_mm_exit_detach(bond->io_mm, bond->dev);
 	}
 
 	list_for_each_entry(tmp, &domain->mm_list, domain_head) {
@@ -453,6 +464,7 @@ static void iommu_notifier_release(struct mmu_notifier *mn, struct mm_struct *mm
 	 * - Clear the PASID table and invalidate TLBs.
 	 * - Drop all references to this io_mm by freeing the bonds.
 	 */
+	trace_io_mm_exit(io_mm);
 	spin_lock(&iommu_sva_lock);
 	if (!io_mm_get_locked(io_mm)) {
 		/* Someone's already taking care of it. */
@@ -502,6 +514,8 @@ static void iommu_notifier_invalidate_range(struct mmu_notifier *mn,
 {
 	struct iommu_bond *bond;
 	struct io_mm *io_mm = container_of(mn, struct io_mm, notifier);
+
+	trace_io_mm_invalidate(io_mm, start, end);
 
 	spin_lock(&iommu_sva_lock);
 	list_for_each_entry(bond, &io_mm->devices, mm_head) {
