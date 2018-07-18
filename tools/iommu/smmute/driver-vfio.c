@@ -20,24 +20,6 @@
 #include "smmute-lib.h"
 #include "smmute-vfio.h"
 
-/* Temporary stubs */
-struct vfio_iommu_type1_bind_process {
-	__u32   flags;
-#define VFIO_IOMMU_BIND_PID		(1 << 0)
-	__u32   pasid;
-	__s32   pid;
-};
-
-struct vfio_iommu_type1_bind {
-	__u32   argsz;
-	__u32   flags;
-#define VFIO_IOMMU_BIND_PROCESS		(1 << 0)
-	__u8    data[];
-};
-
-#define VFIO_IOMMU_BIND			(-1U)
-#define VFIO_IOMMU_UNBIND		(-1U)
-
 static pthread_mutex_t groups_mutex = PTHREAD_MUTEX_INITIALIZER;
 static LIST_HEAD(iommu_groups);
 static LIST_HEAD(vfio_containers); /* Also protected by groups_mutex */
