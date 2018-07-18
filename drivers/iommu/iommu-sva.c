@@ -15,11 +15,11 @@
 /**
  * DOC: io_mm model
  *
- * The io_mm keeps track of process address spaces shared between CPU and IOMMU.
- * The following example illustrates the relation between structures
- * iommu_domain, io_mm and iommu_bond. An iommu_bond is a link between io_mm and
- * device. A device can have multiple io_mm and an io_mm may be bound to
- * multiple devices.
+ * When used with the bind()/unbind() functions, the io_mm keeps track of
+ * process address spaces shared between CPU and IOMMU. The following example
+ * illustrates the relation between structures iommu_domain, io_mm and
+ * iommu_bond. An iommu_bond is a link between io_mm and device. A device can
+ * have multiple io_mm and an io_mm may be bound to multiple devices.
  *              ___________________________
  *             |  IOMMU domain A           |
  *             |  ________________         |
@@ -97,6 +97,12 @@
  * non-PASID translations. In this case PASID 0 is reserved and entry 0 points
  * to the io_pgtable base. On Intel IOMMU, the io_pgtable base would be held in
  * the device table and PASID 0 would be available to the allocator.
+ *
+ * The io_mm can also represent a private IOMMU address space, which isn't
+ * shared with a process. The device driver calls iommu_sva_alloc_pasid which
+ * returns an io_mm that can be populated with the iommu_sva_map/unmap
+ * functions. The principle is the same as shared io_mm, except that a private
+ * io_mm cannot be bound to multiple devices.
  */
 
 struct iommu_bond {
@@ -130,6 +136,9 @@ static DEFINE_SPINLOCK(iommu_sva_lock);
 
 static struct mmu_notifier_ops iommu_mmu_notifier;
 
+#define io_mm_is_private(io_mm) ((io_mm) != NULL && (io_mm)->mm == NULL)
+#define io_mm_is_shared(io_mm) ((io_mm) != NULL && (io_mm)->mm != NULL)
+
 static struct io_mm *
 io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 	    struct mm_struct *mm, unsigned long flags)
@@ -148,19 +157,10 @@ io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 	if (!io_mm)
 		return ERR_PTR(-ENOMEM);
 
-	/*
-	 * The mm must not be freed until after the driver frees the io_mm
-	 * (which may involve unpinning the CPU ASID for instance, requiring a
-	 * valid mm struct.)
-	 */
-	mmgrab(mm);
-
 	io_mm->flags		= flags;
 	io_mm->mm		= mm;
-	io_mm->notifier.ops	= &iommu_mmu_notifier;
 	io_mm->release		= domain->ops->mm_free;
 	INIT_LIST_HEAD(&io_mm->devices);
-	/* Leave kref to zero until the io_mm is fully initialized */
 
 	idr_preload(GFP_KERNEL);
 	spin_lock(&iommu_sva_lock);
@@ -175,6 +175,32 @@ io_mm_alloc(struct iommu_domain *domain, struct device *dev,
 		goto err_free_mm;
 	}
 
+	return io_mm;
+
+err_free_mm:
+	io_mm->release(io_mm);
+	return ERR_PTR(ret);
+}
+
+static struct io_mm *
+io_mm_alloc_shared(struct iommu_domain *domain, struct device *dev,
+		   struct mm_struct *mm, unsigned long flags)
+{
+	int ret;
+	struct io_mm *io_mm;
+
+	io_mm = io_mm_alloc(domain, dev, mm, flags);
+	if (IS_ERR(io_mm))
+		return io_mm;
+
+	/*
+	 * The mm must not be freed until after the driver frees the io_mm
+	 * (which may involve unpinning the CPU ASID for instance, requiring a
+	 * valid mm struct.)
+	 */
+	mmgrab(mm);
+
+	io_mm->notifier.ops = &iommu_mmu_notifier;
 	ret = mmu_notifier_register(&io_mm->notifier, mm);
 	if (ret)
 		goto err_free_pasid;
@@ -202,7 +228,6 @@ err_free_pasid:
 	idr_remove(&iommu_pasid_idr, io_mm->pasid);
 	spin_unlock(&iommu_sva_lock);
 
-err_free_mm:
 	io_mm->release(io_mm);
 	mmdrop(mm);
 
@@ -231,6 +256,11 @@ static void io_mm_release(struct kref *kref)
 	/* The PASID can now be reallocated for another mm. */
 	idr_remove(&iommu_pasid_idr, io_mm->pasid);
 
+	if (io_mm_is_private(io_mm)) {
+		io_mm->release(io_mm);
+		return;
+	}
+
 	/*
 	 * If we're being released from mm exit, the notifier callback ->release
 	 * has already been called. Otherwise we don't need ->release, the io_mm
@@ -258,7 +288,7 @@ static int io_mm_get_locked(struct io_mm *io_mm)
 	if (io_mm && kref_get_unless_zero(&io_mm->kref)) {
 		/*
 		 * kref_get_unless_zero doesn't provide ordering for reads. This
-		 * barrier pairs with the one in io_mm_alloc.
+		 * barrier pairs with the one in io_mm_alloc_shared.
 		 */
 		smp_rmb();
 		return 1;
@@ -289,7 +319,7 @@ static int io_mm_attach(struct iommu_domain *domain, struct device *dev,
 	struct iommu_sva_param *param = dev->iommu_param->sva_param;
 
 	if (!domain->ops->mm_attach || !domain->ops->mm_detach ||
-	    !domain->ops->mm_invalidate)
+	    (io_mm_is_shared(io_mm) && !domain->ops->mm_invalidate))
 		return -ENODEV;
 
 	if (pasid > param->max_pasid || pasid < param->min_pasid)
@@ -550,7 +580,7 @@ int iommu_sva_device_init(struct device *dev, unsigned long features,
 	struct iommu_sva_param *param;
 	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
 
-	if (!domain || !domain->ops->sva_device_init)
+	if (!domain)
 		return -ENODEV;
 
 	if (features & ~IOMMU_SVA_FEAT_IOPF)
@@ -578,9 +608,11 @@ int iommu_sva_device_init(struct device *dev, unsigned long features,
 	 * IOMMU driver updates the limits depending on the IOMMU and device
 	 * capabilities.
 	 */
-	ret = domain->ops->sva_device_init(dev, param);
-	if (ret)
-		goto err_free_param;
+	if (domain->ops->sva_device_init) {
+		ret = domain->ops->sva_device_init(dev, param);
+		if (ret)
+			goto err_free_param;
+	}
 
 	mutex_lock(&dev->iommu_param->lock);
 	if (dev->iommu_param->sva_param)
@@ -689,7 +721,7 @@ int __iommu_sva_bind_device(struct device *dev, struct mm_struct *mm,
 	}
 
 	if (!io_mm) {
-		io_mm = io_mm_alloc(domain, dev, mm, flags);
+		io_mm = io_mm_alloc_shared(domain, dev, mm, flags);
 		if (IS_ERR(io_mm))
 			return PTR_ERR(io_mm);
 	}
@@ -724,6 +756,9 @@ int __iommu_sva_unbind_device(struct device *dev, int pasid)
 	/* spin_lock_irq matches the one in wait_event_lock_irq */
 	spin_lock_irq(&iommu_sva_lock);
 	list_for_each_entry(bond, &param->mm_list, dev_head) {
+		if (io_mm_is_private(bond->io_mm))
+			continue;
+
 		if (bond->io_mm->pasid == pasid) {
 			io_mm_detach_locked(bond, true);
 			ret = 0;
@@ -766,6 +801,136 @@ void __iommu_sva_unbind_dev_all(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(__iommu_sva_unbind_dev_all);
 
+/*
+ * iommu_sva_alloc_pasid - Allocate a private PASID
+ *
+ * Allocate a PASID for private map/unmap operations. Create a new I/O address
+ * space for this device, that isn't bound to any process.
+ *
+ * iommu_sva_device_init must have been called first.
+ */
+int iommu_sva_alloc_pasid(struct device *dev, struct io_mm **out)
+{
+	int ret;
+	struct io_mm *io_mm;
+	struct iommu_domain *domain;
+	struct iommu_sva_param *param = dev->iommu_param->sva_param;
+
+	if (!out || !param)
+		return -EINVAL;
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (!domain)
+		return -EINVAL;
+
+	io_mm = io_mm_alloc(domain, dev, NULL, 0);
+	if (IS_ERR(io_mm))
+		return PTR_ERR(io_mm);
+
+	kref_init(&io_mm->kref);
+
+	ret = io_mm_attach(domain, dev, io_mm, NULL);
+	if (ret) {
+		io_mm_put(io_mm);
+		return ret;
+	}
+
+	*out = io_mm;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iommu_sva_alloc_pasid);
+
+void iommu_sva_free_pasid(struct device *dev, struct io_mm *io_mm)
+{
+	struct iommu_bond *bond;
+
+	if (WARN_ON(io_mm_is_shared(io_mm)))
+		return;
+
+	spin_lock(&iommu_sva_lock);
+	list_for_each_entry(bond, &io_mm->devices, mm_head) {
+		if (bond->dev == dev) {
+			io_mm_detach_locked(bond, false);
+			break;
+		}
+	}
+	spin_unlock(&iommu_sva_lock);
+}
+EXPORT_SYMBOL_GPL(iommu_sva_free_pasid);
+
+int iommu_sva_map(struct iommu_domain *domain, struct io_mm *io_mm,
+		  unsigned long iova, phys_addr_t paddr, size_t size, int prot)
+{
+	if (WARN_ON(io_mm_is_shared(io_mm)))
+		return -ENODEV;
+
+	return __iommu_map(domain, io_mm, iova, paddr, size, prot);
+}
+EXPORT_SYMBOL_GPL(iommu_sva_map);
+
+size_t iommu_sva_map_sg(struct iommu_domain *domain, struct io_mm *io_mm,
+			unsigned long iova, struct scatterlist *sg,
+			unsigned int nents, int prot)
+{
+	if (WARN_ON(io_mm_is_shared(io_mm)))
+		return -ENODEV;
+
+	return domain->ops->map_sg(domain, io_mm, iova, sg, nents, prot);
+}
+EXPORT_SYMBOL_GPL(iommu_sva_map_sg);
+
+size_t iommu_sva_unmap(struct iommu_domain *domain, struct io_mm *io_mm,
+		       unsigned long iova, size_t size)
+{
+	if (WARN_ON(io_mm_is_shared(io_mm)))
+		return 0;
+
+	return __iommu_unmap(domain, io_mm, iova, size, true);
+}
+EXPORT_SYMBOL_GPL(iommu_sva_unmap);
+
+size_t iommu_sva_unmap_fast(struct iommu_domain *domain, struct io_mm *io_mm,
+			    unsigned long iova, size_t size)
+{
+	if (WARN_ON(io_mm_is_shared(io_mm)))
+		return 0;
+
+	return __iommu_unmap(domain, io_mm, iova, size, false);
+}
+EXPORT_SYMBOL_GPL(iommu_sva_unmap_fast);
+
+phys_addr_t iommu_sva_iova_to_phys(struct iommu_domain *domain,
+				   struct io_mm *io_mm, dma_addr_t iova)
+{
+	if (!io_mm)
+		return iommu_iova_to_phys(domain, iova);
+
+	if (WARN_ON(io_mm_is_shared(io_mm)))
+		return 0;
+
+	if (unlikely(domain->ops->sva_iova_to_phys == NULL))
+		return 0;
+
+	return domain->ops->sva_iova_to_phys(domain, io_mm, iova);
+}
+EXPORT_SYMBOL_GPL(iommu_sva_iova_to_phys);
+
+void iommu_sva_tlb_range_add(struct iommu_domain *domain, struct io_mm *io_mm,
+			     unsigned long iova, size_t size)
+{
+	if (!io_mm) {
+		iommu_tlb_range_add(domain, iova, size);
+		return;
+	}
+
+	if (WARN_ON(io_mm_is_shared(io_mm)))
+		return;
+
+	if (domain->ops->sva_iotlb_range_add != NULL)
+		domain->ops->sva_iotlb_range_add(domain, io_mm, iova, size);
+}
+EXPORT_SYMBOL_GPL(iommu_sva_tlb_range_add);
+
 /**
  * iommu_sva_find() - Find mm associated to the given PASID
  * @pasid: Process Address Space ID assigned to the mm
@@ -780,7 +945,7 @@ struct mm_struct *iommu_sva_find(int pasid)
 
 	spin_lock(&iommu_sva_lock);
 	io_mm = idr_find(&iommu_pasid_idr, pasid);
-	if (io_mm && io_mm_get_locked(io_mm)) {
+	if (io_mm_is_shared(io_mm) && io_mm_get_locked(io_mm)) {
 		if (mmget_not_zero(io_mm->mm))
 			mm = io_mm->mm;
 
