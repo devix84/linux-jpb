@@ -311,13 +311,18 @@ static bool arm_smmu_free_asid(struct arm_smmu_cd *cd)
 
 static void arm_smmu_free_cd(struct iommu_pasid_entry *entry)
 {
+	u16 asid;
 	struct arm_smmu_cd *cd = pasid_entry_to_cd(entry);
 
 	if (!arm_smmu_free_asid(cd))
 		return;
 
 	if (cd->mm) {
+		asid = mm_context_get(cd->mm);
+		WARN_ON(asid != entry->tag);
+
 		/* Unpin ASID */
+		mm_context_put(cd->mm);
 		mm_context_put(cd->mm);
 	}
 
